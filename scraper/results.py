@@ -37,6 +37,13 @@ def fetch_stage_results(stage_slug: str) -> list[dict]:
     # First table.results is the stage finish table
     table = s.select_one("table.results")
     if not table:
+        # One-day races have results at /result suffix
+        alt_url = pcs_url(stage_slug.rstrip("/") + "/result")
+        alt_html = fetch(alt_url)
+        if alt_html:
+            s = soup(alt_html)
+            table = s.select_one("table.results")
+    if not table:
         log.warning("no results table on %s", stage_slug)
         return []
 

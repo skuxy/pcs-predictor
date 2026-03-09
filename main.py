@@ -37,6 +37,9 @@ def cmd_scrape(args):
 
             stages = fetch_race_stages(race["pcs_slug"])
             for stage_data in stages:
+                if not stage_data.get("pcs_slug"):
+                    log.warning("skipping stage with empty slug in %s", race["name"])
+                    continue
                 stage_data["race_id"] = race_id
                 stage_id = upsert_stage(conn, stage_data)
 
@@ -80,6 +83,30 @@ def cmd_scrape(args):
                     })
 
     log.info("scraping complete")
+
+
+def cmd_train(args):
+    """Train the top-10 probability model."""
+    from model.train import train
+    train(train_cutoff=args.cutoff, val_race_slug=args.val_race)
+
+
+def cmd_backtest(args):
+    """Backtest predictions against a historic race."""
+    from model.backtest import backtest
+    backtest(args.race, args.cutoff, args.top_n)
+
+
+def cmd_predict(args):
+    """Predict top-10 probabilities for a race."""
+    from model.predict import predict_race
+    df = predict_race(args.race, args.cutoff)
+    if df.empty:
+        log.error("no predictions generated")
+        return
+    cols = ["stage_date", "rider_name", "top10_prob", "predicted_top10", "position"]
+    cols = [c for c in cols if c in df.columns]
+    print(df[cols].sort_values(["stage_date", "top10_prob"], ascending=[True, False]).to_string(index=False))
 
 
 def cmd_ingest_gpx(args):
@@ -144,6 +171,23 @@ def main():
     p_scrape.add_argument("--skip-riders", action="store_true",
                           help="Don't fetch individual rider profiles (faster)")
     p_scrape.set_defaults(func=cmd_scrape)
+
+    p_train = sub.add_parser("train", help="Train the prediction model")
+    p_train.add_argument("--cutoff", default="2024-05-04",
+                         help="Train on data before this date (default: Giro 2024 start)")
+    p_train.add_argument("--val-race", default="race/giro-d-italia/2024")
+    p_train.set_defaults(func=cmd_train)
+
+    p_bt = sub.add_parser("backtest", help="Backtest against a historic race")
+    p_bt.add_argument("--race",   default="race/giro-d-italia/2024")
+    p_bt.add_argument("--cutoff", default="2024-05-04")
+    p_bt.add_argument("--top-n",  type=int, default=10, dest="top_n")
+    p_bt.set_defaults(func=cmd_backtest)
+
+    p_pred = sub.add_parser("predict", help="Predict top-10 for an upcoming race")
+    p_pred.add_argument("race",   help="Race slug, e.g. race/tour-de-france/2025")
+    p_pred.add_argument("--cutoff", required=True, help="Feature cutoff date (race start)")
+    p_pred.set_defaults(func=cmd_predict)
 
     p_gpx = sub.add_parser("gpx", help="Ingest a GPX file")
     p_gpx.add_argument("gpx", help="Path to .gpx file")
