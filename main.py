@@ -30,8 +30,9 @@ def cmd_scrape(args):
     years = [int(y) for y in args.years.split(",")] if args.years else SCRAPE_YEARS
 
     log.info("scraping races for years: %s", years)
-    with get_conn() as conn:
-        for race in iter_races(years):
+    for race in iter_races(years):
+        # Commit per-race so progress is never lost on crash/interrupt
+        with get_conn() as conn:
             race_id = upsert_race(conn, race)
             log.info("race: %s (id=%d)", race["name"], race_id)
 
@@ -43,7 +44,6 @@ def cmd_scrape(args):
                 stage_data["race_id"] = race_id
                 stage_id = upsert_stage(conn, stage_data)
 
-                # Results
                 results = fetch_stage_results(stage_data["pcs_slug"])
                 riders_seen: dict[str, int] = {}
 
@@ -55,7 +55,6 @@ def cmd_scrape(args):
                             if rider:
                                 rider_id = upsert_rider(conn, rider)
                             else:
-                                # Minimal placeholder
                                 rider_id = upsert_rider(conn, {
                                     "pcs_slug": slug, "name": r["rider_name"],
                                     "nationality": None, "dob": None, "team": None,
