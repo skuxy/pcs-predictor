@@ -41,13 +41,10 @@ def train(
     df = df.dropna(subset=["top10"])
     df["top10"] = df["top10"].astype(int)
 
-    # Time-based split
+    # Time-based split: train on everything before cutoff, validate on after
+    df["stage_date"] = pd.to_datetime(df["stage_date"])
     train_df = df[df["stage_date"] < pd.Timestamp(train_cutoff)]
     val_df   = df[df["stage_date"] >= pd.Timestamp(train_cutoff)]
-
-    if val_race_slug:
-        val_df = val_df[val_df["race_name"].str.lower().str.contains("giro", na=False)
-                        | val_df["stage_date"] >= pd.Timestamp(train_cutoff)]
 
     log.info("train rows: %d  val rows: %d", len(train_df), len(val_df))
     log.info("train top10 rate: %.3f", train_df["top10"].mean())
