@@ -1,8 +1,7 @@
-# PCS Race Predictor
+# Cycling Race Predictor
 
-Predicts professional cycling race outcomes by scraping historical results from
-[ProCyclingStats](https://www.procyclingstats.com), building rider profiles, and
-applying a machine-learning model to upcoming races.
+Predicts professional cycling race outcomes by collecting historical results,
+building rider profiles, and applying a machine-learning model to upcoming races.
 
 Optionally, GPX files can be ingested to enrich race profiles with real elevation
 and climb data.
@@ -25,7 +24,7 @@ pcs-predictor/
 ├── model/             # (Phase 3) training & prediction
 ├── cache/html/        # cached raw HTML (git-ignored)
 ├── data/              # SQLite database (git-ignored)
-├── config.py          # URLs, rate limits, years to scrape
+├── config.py          # URLs, rate limits, years to collect
 ├── main.py            # CLI entry point
 └── requirements.txt
 ```
@@ -49,13 +48,13 @@ pip install -r requirements.txt
 python main.py init
 ```
 
-### 2. Scrape data
-Scrape all configured years (see `config.py → SCRAPE_YEARS`):
+### 2. Collect data
+Collect all configured years (see `config.py → SCRAPE_YEARS`):
 ```bash
 python main.py scrape
 ```
 
-Scrape specific years only:
+Specific years only:
 ```bash
 python main.py scrape --years 2024,2025
 ```
@@ -78,8 +77,8 @@ python main.py gpx path/to/stage.gpx --stage race/tour-de-france/2025/stage-17
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SCRAPE_YEARS` | `[2024, 2025]` | Years of results to collect |
-| `RACE_CLASSES` | WT / HC / 2.1 | PCS race tiers to include |
-| `REQUEST_DELAY` | `1.5` s | Pause between HTTP requests |
+| `RACE_CLASSES` | WT / HC / 2.1 | Race tiers to include |
+| `REQUEST_DELAY` | `1.5` s | Pause between requests |
 | `CACHE_DIR` | `cache/html` | Where to store cached HTML |
 | `DB_PATH` | `data/cycling.db` | SQLite database location |
 
@@ -89,7 +88,7 @@ python main.py gpx path/to/stage.gpx --stage race/tour-de-france/2025/stage-17
 
 | Phase | Status | Description |
 |-------|--------|-------------|
-| 1 — Scraper | ✅ implemented | Collect races, stages, results, rider profiles |
+| 1 — Data collection | ✅ implemented | Collect races, stages, results, rider profiles |
 | 2 — Features | 🔜 next | Build rider form, speciality-match, team features |
 | 3 — Model | 🔜 planned | Train gradient-boosted classifier on historical data |
 | 4 — Predict | 🔜 planned | Score riders for upcoming races |
@@ -107,7 +106,7 @@ any stage and ingest it with `python main.py gpx`. The parser will:
 - Detect significant climbs (configurable thresholds)
 - Store per-climb stats (length, avg/max gradient) in `stage_climbs` table
 
-These features feed directly into Phase 2 as richer alternatives to PCS's
-simplified profile tags (`flat` / `hilly` / `mountain`).
+These features feed directly into Phase 2 as richer alternatives to simplified
+profile tags (`flat` / `hilly` / `mountain`).
 
 See [docs/gpx.md](docs/gpx.md) for details.
