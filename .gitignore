@@ -6,3 +6,4 @@ data/
 *.db
 *.pkl
 .claude/
+logs/

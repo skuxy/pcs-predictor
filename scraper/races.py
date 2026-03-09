@@ -236,7 +236,8 @@ def _flag_country(cell) -> str | None:
 
 def _parse_float(s: str) -> float | None:
     try:
-        return float(re.sub(r"[^\d.]", "", s))
+        # Replace comma decimal separator before stripping non-numeric chars
+        return float(re.sub(r"[^\d.]", "", s.replace(",", ".")))
     except Exception:
         return None
 

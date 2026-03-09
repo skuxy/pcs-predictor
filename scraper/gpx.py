@@ -60,35 +60,35 @@ def detect_climbs(
     in_climb = False
     climb_start_idx = 0
 
+    def _check_and_add(start: int, end: int) -> None:
+        length_km = cum_dist[end] - cum_dist[start]
+        gain = smoothed[end] - smoothed[start]
+        if length_km >= min_length_km and gain >= min_gain_m:
+            gradients = _segment_gradients(smoothed, cum_dist, start, end)
+            climbs.append(
+                {
+                    "start_km": round(cum_dist[start], 2),
+                    "end_km": round(cum_dist[end], 2),
+                    "length_km": round(length_km, 2),
+                    "elevation_gain_m": round(gain, 0),
+                    "avg_gradient_pct": round(gain / (length_km * 10), 2),
+                    "max_gradient_pct": round(max(gradients), 2) if gradients else None,
+                }
+            )
+
     for i in range(1, len(smoothed)):
         rising = smoothed[i] > smoothed[i - 1]
 
         if rising and not in_climb:
             in_climb = True
             climb_start_idx = i - 1
-
         elif not rising and in_climb:
-            # Check if this climb is significant enough
-            start = climb_start_idx
-            end = i
-            length_km = cum_dist[end] - cum_dist[start]
-            gain = smoothed[end] - smoothed[start]
-
-            if length_km >= min_length_km and gain >= min_gain_m:
-                gradients = _segment_gradients(smoothed, cum_dist, start, end)
-                climbs.append(
-                    {
-                        "start_km": round(cum_dist[start], 2),
-                        "end_km": round(cum_dist[end], 2),
-                        "length_km": round(length_km, 2),
-                        "elevation_gain_m": round(gain, 0),
-                        "avg_gradient_pct": round(
-                            gain / (length_km * 10), 2
-                        ),  # gain/dist*100
-                        "max_gradient_pct": round(max(gradients), 2) if gradients else None,
-                    }
-                )
+            _check_and_add(climb_start_idx, i)
             in_climb = False
+
+    # Flush any climb that runs to the end of the data
+    if in_climb:
+        _check_and_add(climb_start_idx, len(smoothed) - 1)
 
     return climbs
 
