@@ -81,14 +81,15 @@ def upsert_stage(conn: sqlite3.Connection, data: dict) -> int:
     conn.execute(
         """
         INSERT INTO stages (race_id, stage_num, pcs_slug, date, distance_km,
-                            elevation_m, profile_type, departure, arrival, gpx_path)
+                            elevation_m, profile_type, surface, departure, arrival, gpx_path)
         VALUES (:race_id, :stage_num, :pcs_slug, :date, :distance_km,
-                :elevation_m, :profile_type, :departure, :arrival, :gpx_path)
+                :elevation_m, :profile_type, :surface, :departure, :arrival, :gpx_path)
         ON CONFLICT(pcs_slug) DO UPDATE SET
             date         = excluded.date,
             distance_km  = excluded.distance_km,
-            elevation_m  = excluded.elevation_m,
+            elevation_m  = COALESCE(excluded.elevation_m, stages.elevation_m),
             profile_type = excluded.profile_type,
+            surface      = excluded.surface,
             departure    = excluded.departure,
             arrival      = excluded.arrival
         """,

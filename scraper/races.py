@@ -4,7 +4,8 @@ import re
 from typing import Iterator
 
 from scraper.utils import fetch, soup, pcs_url
-from config import SCRAPE_YEARS, RACE_CLASSES, WOMEN_RACE_CLASSES, WOMEN_CIRCUIT
+from config import SCRAPE_YEARS, RACE_CLASSES, WOMEN_RACE_CLASSES, WOMEN_CIRCUIT, \
+    COBBLED_RACE_SLUGS, GRAVEL_RACE_SLUGS
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +75,30 @@ def _parse_race_list(html: str, year: int, race_classes: list[str] = RACE_CLASSE
         }
 
 
+def _surface_for_race(race_slug: str) -> str:
+    """Return 'cobbled', 'gravel', or 'road' based on the race slug."""
+    for pattern in COBBLED_RACE_SLUGS:
+        if pattern in race_slug:
+            return "cobbled"
+    for pattern in GRAVEL_RACE_SLUGS:
+        if pattern in race_slug:
+            return "gravel"
+    return "road"
+
+
+def fetch_stage_elevation(stage_slug: str) -> int | None:
+    """
+    Fetch a stage's detail page and extract elevation gain (vertical meters).
+    Returns None if not found or page unavailable.
+    """
+    url = pcs_url(stage_slug)
+    html = fetch(url)
+    if not html:
+        return None
+    info = _parse_infolist(soup(html))
+    return _parse_int(info.get("vertical meters", "") or info.get("altitude difference", ""))
+
+
 def fetch_race_stages(race_slug: str) -> list[dict]:
     """
     Return a list of stage dicts from the race overview page.
@@ -87,11 +112,12 @@ def fetch_race_stages(race_slug: str) -> list[dict]:
         return []
 
     s = soup(html)
+    surface = _surface_for_race(race_slug)
     # The stages table has header containing "Date" and "KM"
     stage_table = _find_stages_table(s)
     if stage_table:
         year = _year_from_slug(race_slug)
-        return _parse_stages_table(stage_table, race_slug, year)
+        return _parse_stages_table(stage_table, race_slug, year, surface=surface)
 
     # One-day race — use the /result page info
     return _single_day_stage(race_slug, s)
@@ -106,7 +132,7 @@ def _find_stages_table(s):
     return None
 
 
-def _parse_stages_table(table, race_slug: str, year: int) -> list[dict]:
+def _parse_stages_table(table, race_slug: str, year: int, surface: str = "road") -> list[dict]:
     """
     Stage table row structure (verified):
       td[0]: date  "16/01"
@@ -145,8 +171,9 @@ def _parse_stages_table(table, race_slug: str, year: int) -> list[dict]:
             "stage_num": i,
             "date": date_str,
             "distance_km": _parse_float(cells[4].get_text(strip=True)) if len(cells) > 4 else None,
-            "elevation_m": None,          # not on this page; populated from stage detail later
+            "elevation_m": None,          # not on this page; backfilled via scrape-elevation
             "profile_type": profile_type,
+            "surface": surface,
             "departure": departure,
             "arrival": arrival,
             "gpx_path": None,
@@ -164,6 +191,7 @@ def _single_day_stage(race_slug: str, s) -> list[dict]:
         "distance_km": _parse_float(info.get("distance", "")),
         "elevation_m": _parse_int(info.get("vertical meters", "")),
         "profile_type": info.get("parcours type", "").lower() or None,
+        "surface": _surface_for_race(race_slug),
         "departure": info.get("departure") or info.get("start"),
         "arrival": info.get("arrival") or info.get("finish"),
         "gpx_path": None,

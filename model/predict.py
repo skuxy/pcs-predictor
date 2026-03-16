@@ -101,12 +101,20 @@ def predict_from_startlist(
     results_df["date"] = pd.to_datetime(results_df["date"], errors="coerce")
 
     race_stage_count = len(stages)
+
+    # Build prev_profile_type lookup: {stage_id: profile_type of preceding stage}
+    stages_sorted = sorted(stages, key=lambda s: (s["date"] or ""))
+    prev_profile = {}
+    for i, s in enumerate(stages_sorted):
+        prev_profile[s["id"]] = stages_sorted[i - 1]["profile_type"] if i > 0 else None
+
     rows = []
 
     for stage in stages:
         stage_date = pd.to_datetime(stage["date"])
         stage_num  = stage["stage_num"] or 1
         stage_num_norm = stage_num / race_stage_count
+        prev_pt = prev_profile.get(stage["id"])
 
         for starter in starters:
             # Look up or match rider_id
@@ -152,6 +160,22 @@ def predict_from_startlist(
                 sub = finished[finished["profile_type"] == ptype]["position"].dropna()
                 return sub.mean() if len(sub) else np.nan
 
+            def profile_avg_rolling(ptype, days):
+                if finished.empty: return np.nan
+                sub = finished[
+                    (finished["profile_type"] == ptype) &
+                    (finished["date"] >= stage_date - pd.Timedelta(days=days))
+                ]["position"].dropna()
+                return sub.mean() if len(sub) else np.nan
+
+            def profile_top10_rate(ptype, days):
+                if finished.empty: return np.nan
+                sub = finished[
+                    (finished["profile_type"] == ptype) &
+                    (finished["date"] >= stage_date - pd.Timedelta(days=days))
+                ]
+                return sub["is_top10"].mean() if len(sub) else np.nan
+
             races_30d = 0 if history.empty else \
                 history[history["date"] >= stage_date - pd.Timedelta(days=30)]["stage_id"].nunique()
 
@@ -191,14 +215,31 @@ def predict_from_startlist(
                 "hilly_avg_pos":    profile_avg("hilly"),
                 "tt_avg_pos":       profile_avg("itt"),
 
+                "hilly_avg_pos_30d":    profile_avg_rolling("hilly", 30),
+                "hilly_avg_pos_90d":    profile_avg_rolling("hilly", 90),
+                "hilly_top10_rate_90d": profile_top10_rate("hilly", 90),
+                "mountain_avg_pos_90d": profile_avg_rolling("mountain", 90),
+                "flat_avg_pos_30d":     profile_avg_rolling("flat", 30),
+
+                "elevation_per_km": (
+                    stage["elevation_m"] / stage["distance_km"]
+                    if stage["distance_km"] else np.nan
+                ),
+
                 "distance_km":    stage["distance_km"],
                 "elevation_m":    stage["elevation_m"],
                 "profile_type":   stage["profile_type"],
                 "stage_num_norm": stage_num_norm,
                 "is_stage_race":  1,
+                "prev_stage_is_mountain": int(prev_pt == "mountain") if prev_pt else 0,
+                "prev_stage_is_hilly":    int(prev_pt == "hilly")    if prev_pt else 0,
                 "pcs_rank":       pcs_rank,
                 "speciality":     speciality,
             }
+
+            surface = stage["surface"] if "surface" in stage.keys() else "road"
+            row["is_cobbled"] = int(surface == "cobbled")
+            row["is_gravel"]  = int(surface == "gravel")
 
             for pt in PROFILE_TYPES:
                 row[f"is_{pt}"] = int(stage["profile_type"] == pt) if stage["profile_type"] else 0

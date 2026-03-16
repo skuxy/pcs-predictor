@@ -25,10 +25,15 @@ FEATURE_COLS = [
     "win_rate_90d", "dnf_rate_90d",
     "races_last_30d", "days_since_last_race",
     "mountain_avg_pos", "flat_avg_pos", "hilly_avg_pos", "tt_avg_pos",
+    "hilly_avg_pos_30d", "hilly_avg_pos_90d", "hilly_top10_rate_90d",
+    "mountain_avg_pos_90d", "flat_avg_pos_30d",
+    "elevation_per_km",
     "distance_km", "elevation_m",
     "stage_num_norm", "is_stage_race",
+    "prev_stage_is_mountain", "prev_stage_is_hilly",
     "pcs_rank",
     "is_flat", "is_hilly", "is_mountain", "is_itt", "is_utt",
+    "is_cobbled", "is_gravel",
     "spec_gc", "spec_sprinter", "spec_puncher",
     "spec_classics", "spec_tt", "spec_climber",
 ]
@@ -59,7 +64,7 @@ def build_features(
             conn,
         )
         stages = pd.read_sql(
-            "SELECT id, race_id, stage_num, date, distance_km, elevation_m, profile_type FROM stages",
+            "SELECT id, race_id, stage_num, date, distance_km, elevation_m, profile_type, surface FROM stages",
             conn,
         )
         races = pd.read_sql(
@@ -89,6 +94,11 @@ def build_features(
     stages = stages.join(stage_counts, on="race_id")
     stages["stage_num_norm"] = stages["stage_num"].fillna(1) / stages["race_stage_count"]
 
+    # prev_stage profile: sort by (race_id, date), shift within each race
+    stages_sorted = stages.sort_values(["race_id", "date"])
+    prev = stages_sorted.groupby("race_id")["profile_type"].shift(1)
+    stages["prev_profile_type"] = prev.values
+
     results["is_finished"] = results["status"] == "finished"
     results["is_dnf"]      = results["status"].isin(["dnf", "dns", "otl", "dsq"])
     results["is_top10"]    = (results["position"] <= 10) & results["position"].notna()
@@ -117,6 +127,7 @@ def build_features(
     base = results[results["stage_id"].isin(target_stages["id"])].copy()
     base = base.merge(
         target_stages[["id", "date", "distance_km", "elevation_m", "profile_type",
+                        "surface", "prev_profile_type",
                         "stage_num_norm", "is_stage_race", "race_name", "race_slug"]].rename(
             columns={"id": "stage_id", "date": "stage_date", "profile_type": "stage_profile"}
         ),
@@ -193,6 +204,28 @@ def build_features(
         series = prof_sub.groupby(["rider_id", "stage_id"])["position"].mean()
         attach(series, col)
 
+    # ── profile-specific rolling features ─────────────────────────────────────
+    for ptype, days, col in [
+        ("hilly",    30,  "hilly_avg_pos_30d"),
+        ("hilly",    90,  "hilly_avg_pos_90d"),
+        ("mountain", 90,  "mountain_avg_pos_90d"),
+        ("flat",     30,  "flat_avg_pos_30d"),
+    ]:
+        mask = (joined["hist_profile"] == ptype) & (
+            (joined["stage_date"] - joined["hist_date"]).dt.days <= days
+        )
+        series = joined[mask].groupby(["rider_id", "stage_id"])["position"].mean()
+        attach(series, col)
+
+    hilly_90 = joined[
+        (joined["hist_profile"] == "hilly") &
+        ((joined["stage_date"] - joined["hist_date"]).dt.days <= 90)
+    ]
+    attach(hilly_90.groupby(["rider_id", "stage_id"])["is_top10"].mean(), "hilly_top10_rate_90d")
+
+    # ── elevation density ─────────────────────────────────────────────────────
+    base["elevation_per_km"] = base["elevation_m"] / base["distance_km"].replace(0, np.nan)
+
     # ── rider attributes ──────────────────────────────────────────────────────
     base = base.merge(
         riders[["id", "name", "pcs_rank", "speciality"]].rename(
@@ -206,6 +239,12 @@ def build_features(
         base[f"is_{pt}"] = (base["stage_profile"] == pt).astype(int)
     for sp in SPECIALITIES:
         base[f"spec_{sp}"] = (base["speciality"] == sp).astype(int)
+
+    base["is_cobbled"] = (base["surface"] == "cobbled").astype(int)
+    base["is_gravel"]  = (base["surface"] == "gravel").astype(int)
+
+    base["prev_stage_is_mountain"] = (base["prev_profile_type"] == "mountain").astype(int)
+    base["prev_stage_is_hilly"]    = (base["prev_profile_type"] == "hilly").astype(int)
 
     base = base.drop(columns=["profile_type"], errors="ignore").rename(columns={
         "stage_profile": "profile_type",
@@ -225,7 +264,7 @@ def _load_results(conn) -> pd.DataFrame:
 
 def _load_stages(conn) -> pd.DataFrame:
     return pd.read_sql(
-        "SELECT id, race_id, stage_num, date, distance_km, elevation_m, profile_type FROM stages",
+        "SELECT id, race_id, stage_num, date, distance_km, elevation_m, profile_type, surface FROM stages",
         conn,
     )
 

@@ -110,6 +110,65 @@ def cmd_predict(args):
     print_predictions(df, top_n=args.top_n)
 
 
+def cmd_scrape_elevation(args):
+    """Backfill elevation_m for stages that are missing it."""
+    from scraper.races import fetch_stage_elevation
+    from db.database import get_conn
+
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT id, pcs_slug FROM stages
+               WHERE elevation_m IS NULL AND pcs_slug NOT LIKE '%/result'
+               ORDER BY id"""
+        ).fetchall()
+
+    log.info("stages missing elevation: %d", len(rows))
+    updated = 0
+    for row in rows:
+        elev = fetch_stage_elevation(row["pcs_slug"])
+        if elev:
+            with get_conn() as conn:
+                conn.execute(
+                    "UPDATE stages SET elevation_m = ? WHERE id = ?",
+                    (elev, row["id"]),
+                )
+            updated += 1
+            log.info("  %s → %d m", row["pcs_slug"], elev)
+        else:
+            log.debug("  %s → no data", row["pcs_slug"])
+
+    log.info("elevation backfill complete: %d/%d updated", updated, len(rows))
+
+
+def cmd_tag_surface(args):
+    """Backfill surface column for existing stages based on race slug."""
+    from db.database import get_conn
+    from config import COBBLED_RACE_SLUGS, GRAVEL_RACE_SLUGS
+
+    with get_conn() as conn:
+        stages = conn.execute(
+            "SELECT s.id, s.pcs_slug FROM stages s"
+        ).fetchall()
+
+        cobbled = updated = 0
+        for row in stages:
+            slug = row["pcs_slug"]
+            surface = "road"
+            if any(p in slug for p in COBBLED_RACE_SLUGS):
+                surface = "cobbled"
+            elif any(p in slug for p in GRAVEL_RACE_SLUGS):
+                surface = "gravel"
+            if surface != "road":
+                conn.execute(
+                    "UPDATE stages SET surface = ? WHERE id = ?",
+                    (surface, row["id"]),
+                )
+                cobbled += 1
+            updated += 1
+
+    log.info("surface tagging complete: %d/%d non-road stages", cobbled, updated)
+
+
 def cmd_ingest_gpx(args):
     """Parse a GPX file and attach climb data to a stage."""
     from scraper.gpx import parse_gpx
@@ -201,6 +260,12 @@ def main():
     p_gpx.add_argument("--stage", dest="stage_slug",
                        help="PCS stage slug to attach climb data to")
     p_gpx.set_defaults(func=cmd_ingest_gpx)
+
+    sub.add_parser("scrape-elevation", help="Backfill elevation_m for all stages") \
+       .set_defaults(func=cmd_scrape_elevation)
+
+    sub.add_parser("tag-surface", help="Backfill cobbled/gravel surface tags") \
+       .set_defaults(func=cmd_tag_surface)
 
     args = parser.parse_args()
     args.func(args)

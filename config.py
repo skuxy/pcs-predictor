@@ -17,3 +17,22 @@ RACE_CLASSES = ["2.UWT", "2.HC", "2.1", "1.UWT", "1.HC"]
 # Women's WorldTour class codes (circuit=24 on PCS)
 WOMEN_RACE_CLASSES = ["2.WWT", "1.WWT"]
 WOMEN_CIRCUIT = "24"
+
+# Race slugs whose stages are predominantly cobbled
+COBBLED_RACE_SLUGS = [
+    "paris-roubaix",
+    "ronde-van-vlaanderen",
+    "e3-saxo",
+    "e3-harelbeke",
+    "dwars-door-vlaanderen",
+    "omloop-het-nieuwsblad",
+    "classic-brugge-de-panne",
+    "bredene-koksijde",
+    "nokere-koerse",
+    "gp-de-denain",
+]
+
+# Race slugs that are predominantly gravel
+GRAVEL_RACE_SLUGS = [
+    "strade-bianche",
+]

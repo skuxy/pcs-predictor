@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS stages (
     distance_km     REAL,
     elevation_m     INTEGER,
     profile_type    TEXT,               -- flat/hilly/mountain/itt/utt
+    surface         TEXT DEFAULT 'road', -- road/cobbled/gravel
     departure       TEXT,
     arrival         TEXT,
     gpx_path        TEXT                -- path to local GPX file if available
