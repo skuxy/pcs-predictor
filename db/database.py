@@ -57,16 +57,17 @@ def upsert_race(conn: sqlite3.Connection, data: dict) -> int:
     conn.execute(
         """
         INSERT INTO races (pcs_slug, name, year, start_date, end_date, class,
-                           country, is_stage_race)
+                           country, is_stage_race, gender)
         VALUES (:pcs_slug, :name, :year, :start_date, :end_date, :class,
-                :country, :is_stage_race)
+                :country, :is_stage_race, :gender)
         ON CONFLICT(pcs_slug) DO UPDATE SET
             name          = excluded.name,
             start_date    = excluded.start_date,
             end_date      = excluded.end_date,
             class         = excluded.class,
             country       = excluded.country,
-            is_stage_race = excluded.is_stage_race
+            is_stage_race = excluded.is_stage_race,
+            gender        = excluded.gender
         """,
         data,
     )

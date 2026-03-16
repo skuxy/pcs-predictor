@@ -37,6 +37,7 @@ FEATURE_COLS = [
 def build_features(
     cutoff_date: str | None = None,
     race_slug: str | None = None,
+    gender: str = "men",
 ) -> pd.DataFrame:
     """
     Build a feature DataFrame efficiently using vectorised operations.
@@ -48,6 +49,8 @@ def build_features(
         History still uses all data before each stage's own date.
     race_slug : str e.g. 'race/giro-d-italia/2024'
         If given, only stages in this race are targets.
+    gender : 'men' or 'women'
+        Filter races by gender.
     """
     log.info("loading data from DB …")
     with get_conn() as conn:
@@ -60,13 +63,16 @@ def build_features(
             conn,
         )
         races = pd.read_sql(
-            "SELECT id, pcs_slug, name, year, is_stage_race FROM races",
+            "SELECT id, pcs_slug, name, year, is_stage_race, gender FROM races",
             conn,
         )
         riders = pd.read_sql(
             "SELECT id, name, pcs_rank, speciality FROM riders",
             conn,
         )
+
+    # ── filter by gender ──────────────────────────────────────────────────────
+    races = races[races["gender"].fillna("men") == gender]
 
     # ── basic prep ────────────────────────────────────────────────────────────
     stages = stages.merge(
@@ -201,10 +207,36 @@ def build_features(
     for sp in SPECIALITIES:
         base[f"spec_{sp}"] = (base["speciality"] == sp).astype(int)
 
-    base = base.rename(columns={
+    base = base.drop(columns=["profile_type"], errors="ignore").rename(columns={
         "stage_profile": "profile_type",
-        "stage_date":    "stage_date",
     })
 
     log.info("features built: %d rows, %d columns", len(base), len(base.columns))
     return base
+
+
+# ── DB loaders (also used by predict.py for start-list predictions) ───────────
+
+def _load_results(conn) -> pd.DataFrame:
+    return pd.read_sql(
+        "SELECT id, stage_id, rider_id, position, status FROM results", conn
+    )
+
+
+def _load_stages(conn) -> pd.DataFrame:
+    return pd.read_sql(
+        "SELECT id, race_id, stage_num, date, distance_km, elevation_m, profile_type FROM stages",
+        conn,
+    )
+
+
+def _load_races(conn) -> pd.DataFrame:
+    return pd.read_sql(
+        "SELECT id, pcs_slug, name, year, is_stage_race FROM races", conn
+    )
+
+
+def _load_riders(conn) -> pd.DataFrame:
+    return pd.read_sql(
+        "SELECT id, pcs_slug, name, pcs_rank, speciality FROM riders", conn
+    )

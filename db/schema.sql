@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS races (
     class       TEXT,                   -- 2.UWT etc.
     country     TEXT,
     is_stage_race INTEGER DEFAULT 0,
+    gender      TEXT DEFAULT 'men',     -- men / women
     UNIQUE(pcs_slug)
 );
 

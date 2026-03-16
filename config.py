@@ -13,3 +13,7 @@ SCRAPE_YEARS = [2023, 2024]  # years of results to collect
 # Race tiers to include (PCS classification codes)
 # 2.UWT = UCI WorldTour, 2.HC = Hors Categorie, 2.1 = first division
 RACE_CLASSES = ["2.UWT", "2.HC", "2.1", "1.UWT", "1.HC"]
+
+# Women's WorldTour class codes (circuit=24 on PCS)
+WOMEN_RACE_CLASSES = ["2.WWT", "1.WWT"]
+WOMEN_CIRCUIT = "24"

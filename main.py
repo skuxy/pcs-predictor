@@ -8,7 +8,7 @@ from db.database import init_db, get_conn, upsert_race, upsert_stage, upsert_rid
 from scraper.races import iter_races, fetch_race_stages
 from scraper.results import fetch_stage_results
 from scraper.riders import fetch_rider
-from config import SCRAPE_YEARS, DB_PATH
+from config import SCRAPE_YEARS, DB_PATH, RACE_CLASSES, WOMEN_RACE_CLASSES, WOMEN_CIRCUIT
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,9 +28,13 @@ def cmd_scrape(args):
     """Scrape races, stages, results, and rider profiles."""
     init_db()
     years = [int(y) for y in args.years.split(",")] if args.years else SCRAPE_YEARS
+    if args.gender == "women":
+        race_classes, circuit = WOMEN_RACE_CLASSES, WOMEN_CIRCUIT
+    else:
+        race_classes, circuit = RACE_CLASSES, "1"
 
-    log.info("scraping races for years: %s", years)
-    for race in iter_races(years):
+    log.info("scraping races for years: %s (gender=%s)", years, args.gender)
+    for race in iter_races(years, race_classes=race_classes, circuit=circuit):
         # Commit per-race so progress is never lost on crash/interrupt
         with get_conn() as conn:
             race_id = upsert_race(conn, race)
@@ -87,25 +91,23 @@ def cmd_scrape(args):
 def cmd_train(args):
     """Train the top-10 probability model."""
     from model.train import train
-    train(train_cutoff=args.cutoff, val_race_slug=args.val_race)
+    train(train_cutoff=args.cutoff, val_race_slug=args.val_race, gender=args.gender)
 
 
 def cmd_backtest(args):
     """Backtest predictions against a historic race."""
     from model.backtest import backtest
-    backtest(args.race, args.cutoff, args.top_n)
+    backtest(args.race, args.cutoff, args.top_n, gender=args.gender)
 
 
 def cmd_predict(args):
     """Predict top-10 probabilities for a race."""
-    from model.predict import predict_race
-    df = predict_race(args.race, args.cutoff)
+    from model.predict import predict_race, print_predictions
+    df = predict_race(args.race, args.cutoff, gender=args.gender)
     if df.empty:
         log.error("no predictions generated")
         return
-    cols = ["stage_date", "rider_name", "top10_prob", "predicted_top10", "position"]
-    cols = [c for c in cols if c in df.columns]
-    print(df[cols].sort_values(["stage_date", "top10_prob"], ascending=[True, False]).to_string(index=False))
+    print_predictions(df, top_n=args.top_n)
 
 
 def cmd_ingest_gpx(args):
@@ -169,23 +171,29 @@ def main():
     p_scrape.add_argument("--years", help="Comma-separated years, e.g. 2024,2025")
     p_scrape.add_argument("--skip-riders", action="store_true",
                           help="Don't fetch individual rider profiles (faster)")
+    p_scrape.add_argument("--gender", default="men", choices=["men", "women"],
+                          help="Which calendar to scrape (default: men)")
     p_scrape.set_defaults(func=cmd_scrape)
 
     p_train = sub.add_parser("train", help="Train the prediction model")
     p_train.add_argument("--cutoff", default="2024-05-04",
                          help="Train on data before this date (default: Giro 2024 start)")
     p_train.add_argument("--val-race", default="race/giro-d-italia/2024")
+    p_train.add_argument("--gender", default="men", choices=["men", "women"])
     p_train.set_defaults(func=cmd_train)
 
     p_bt = sub.add_parser("backtest", help="Backtest against a historic race")
     p_bt.add_argument("--race",   default="race/giro-d-italia/2024")
     p_bt.add_argument("--cutoff", default="2024-05-04")
     p_bt.add_argument("--top-n",  type=int, default=10, dest="top_n")
+    p_bt.add_argument("--gender", default="men", choices=["men", "women"])
     p_bt.set_defaults(func=cmd_backtest)
 
     p_pred = sub.add_parser("predict", help="Predict top-10 for an upcoming race")
-    p_pred.add_argument("race",   help="Race slug, e.g. race/tour-de-france/2025")
+    p_pred.add_argument("race",   help="Race slug, e.g. race/tour-de-france/2026")
     p_pred.add_argument("--cutoff", required=True, help="Feature cutoff date (race start)")
+    p_pred.add_argument("--top-n", type=int, default=15, dest="top_n")
+    p_pred.add_argument("--gender", default="men", choices=["men", "women"])
     p_pred.set_defaults(func=cmd_predict)
 
     p_gpx = sub.add_parser("gpx", help="Ingest a GPX file")

@@ -16,22 +16,37 @@ from features.builder import build_features, FEATURE_COLS
 log = logging.getLogger(__name__)
 
 MODEL_DIR  = Path("model")
-MODEL_PATH = MODEL_DIR / "trained_model.pkl"
-META_PATH  = MODEL_DIR / "feature_names.json"
+
+
+def model_paths(gender: str = "men") -> tuple[Path, Path, Path]:
+    suffix = "" if gender == "men" else f"_{gender}"
+    return (
+        MODEL_DIR / f"trained_model{suffix}.pkl",
+        MODEL_DIR / f"feature_names{suffix}.json",
+        MODEL_DIR / f"metrics{suffix}.json",
+    )
+
+
+# Backwards-compatible aliases for the men's model
+MODEL_PATH   = MODEL_DIR / "trained_model.pkl"
+META_PATH    = MODEL_DIR / "feature_names.json"
 METRICS_PATH = MODEL_DIR / "metrics.json"
 
 
 def train(
-    train_cutoff: str = "2024-05-04",   # Giro 2024 start → everything before is training
+    train_cutoff: str = "2024-05-04",
     val_race_slug: str = "race/giro-d-italia/2024",
+    gender: str = "men",
 ) -> None:
     """
     Train on all data before train_cutoff; validate on val_race_slug.
 
-    Default: train on 2023 + early 2024, validate on Giro 2024.
+    Default: train on 2023 + early 2024, validate on Giro 2024 (men).
+    For women use gender='women' and appropriate cutoff/val_race.
     """
-    log.info("building features …")
-    df = build_features()
+    model_path, meta_path, metrics_path = model_paths(gender)
+    log.info("building features (gender=%s) …", gender)
+    df = build_features(gender=gender)
 
     if df.empty:
         log.error("no features built — run the scraper first")
@@ -81,12 +96,12 @@ def train(
 
     # Save artefacts
     MODEL_DIR.mkdir(exist_ok=True)
-    with open(MODEL_PATH, "wb") as f:
+    with open(model_path, "wb") as f:
         pickle.dump(model, f)
-    META_PATH.write_text(json.dumps(FEATURE_COLS, indent=2))
-    METRICS_PATH.write_text(json.dumps(metrics, indent=2))
+    meta_path.write_text(json.dumps(FEATURE_COLS, indent=2))
+    metrics_path.write_text(json.dumps(metrics, indent=2))
 
-    log.info("model saved to %s", MODEL_PATH)
+    log.info("model saved to %s", model_path)
 
 
 if __name__ == "__main__":

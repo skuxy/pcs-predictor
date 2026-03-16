@@ -27,8 +27,8 @@ from model.predict import predict_race
 log = logging.getLogger(__name__)
 
 
-def backtest(race_slug: str, cutoff_date: str, top_n: int = 10) -> None:
-    df = predict_race(race_slug, cutoff_date)
+def backtest(race_slug: str, cutoff_date: str, top_n: int = 10, gender: str = "men") -> None:
+    df = predict_race(race_slug, cutoff_date, gender=gender)
     if df.empty:
         print("No data — check that the race is in the database.")
         return

@@ -4,22 +4,28 @@ import re
 from typing import Iterator
 
 from scraper.utils import fetch, soup, pcs_url
-from config import SCRAPE_YEARS, RACE_CLASSES
+from config import SCRAPE_YEARS, RACE_CLASSES, WOMEN_RACE_CLASSES, WOMEN_CIRCUIT
 
 log = logging.getLogger(__name__)
 
 
-def iter_races(years: list[int] = SCRAPE_YEARS) -> Iterator[dict]:
+def iter_races(
+    years: list[int] = SCRAPE_YEARS,
+    race_classes: list[str] | None = None,
+    circuit: str = "1",
+) -> Iterator[dict]:
     """Yield race metadata dicts for all configured years and classes."""
+    if race_classes is None:
+        race_classes = RACE_CLASSES
     for year in years:
-        url = pcs_url(f"races.php?year={year}&circuit=1&class=")
+        url = pcs_url(f"races.php?year={year}&circuit={circuit}&class=")
         html = fetch(url)
         if not html:
             continue
-        yield from _parse_race_list(html, year)
+        yield from _parse_race_list(html, year, race_classes)
 
 
-def _parse_race_list(html: str, year: int) -> Iterator[dict]:
+def _parse_race_list(html: str, year: int, race_classes: list[str] = RACE_CLASSES) -> Iterator[dict]:
     """
     Calendar table columns (verified against live PCS HTML):
       0: date range  e.g. "16.01 - 21.01" or "28.01"
@@ -44,7 +50,7 @@ def _parse_race_list(html: str, year: int) -> Iterator[dict]:
             continue
 
         race_class = cells[4].get_text(strip=True)
-        if not any(rc in race_class for rc in RACE_CLASSES):
+        if not any(rc in race_class for rc in race_classes):
             continue
 
         # href: "race/tour-down-under/2024/gc" → strip trailing /gc or /result
@@ -64,6 +70,7 @@ def _parse_race_list(html: str, year: int) -> Iterator[dict]:
             "class": race_class,
             "country": _flag_country(cells[2]),
             "is_stage_race": 1 if is_stage else 0,
+            "gender": "women" if "WWT" in race_class else "men",
         }
 
 
