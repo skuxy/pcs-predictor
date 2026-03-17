@@ -324,9 +324,9 @@
 
 # Upcoming Race Predictions
 
-*Model retrained on 2023–2026 data (cutoff 2026-03-09, val Tirreno-Adriatico 2026: AUC 0.818). Full rider speciality profiles now available.*
+*Model retrained on 2023–2026 data (cutoff 2026-03-09, val Tirreno-Adriatico 2026: AUC 0.856). Includes elevation data, cobbled/gravel surface tags, profile-specific rolling form, and stage context features.*
 
-*Features built from all history up to race start date.*
+*Features built from all history up to race start date. Startlists scraped fresh.*
 
 ---
 
@@ -334,73 +334,73 @@
 
 | # | Rider | P(top10) |
 |---|-------|----------|
-| 1 | PELLIZZARI Giulio | 0.208 |
-| 2 | ULISSI Diego | 0.185 |
-| 3 | TESFATSION Natnael | 0.175 |
-| 4 | PESCADOR Diego | 0.119 |
-| 5 | PIDCOCK Thomas | 0.110 |
-| 6 | CARAPAZ Richard | 0.102 |
-| 7 | CHRISTEN Jan | 0.094 |
-| 8 | UIJTDEBROEKS Cian | 0.076 |
-| 9 | ARANBURU Alex | 0.062 |
-| 10 | CALZONI Walter | 0.062 |
+| 1 | PELLIZZARI Giulio | 0.299 |
+| 2 | ULISSI Diego | 0.215 |
+| 3 | TESFATSION Natnael | 0.206 |
+| 4 | CARAPAZ Richard | 0.161 |
+| 5 | CHRISTEN Jan | 0.130 |
+| 6 | PESCADOR Diego | 0.118 |
+| 7 | PIDCOCK Thomas | 0.118 |
+| 8 | UIJTDEBROEKS Cian | 0.079 |
+| 9 | RUBIO Einer | 0.065 |
+| 10 | ARANBURU Alex | 0.065 |
 
-## Danilith Nokere Koerse — 2026-03-19 (Hilly)
-
-| # | Rider | P(top10) |
-|---|-------|----------|
-| 1 | TEUTENBERG Tim Torn | 0.346 |
-| 2 | BLIKRA Erlend | 0.309 |
-| 3 | KANTER Max | 0.291 |
-| 4 | PICKRELL Riley | 0.289 |
-| 5 | DE SCHUYTENEER Steffen | 0.264 |
-| 6 | ANIOŁKOWSKI Stanisław | 0.247 |
-| 7 | PHILIPSEN Jasper | 0.221 |
-| 8 | HUENS Axel | 0.221 |
-| 9 | MEZGEC Luka | 0.213 |
-| 10 | ERŽEN Žak | 0.199 |
-
-## Grand Prix de Denain — 2026-03-25 (Flat)
+## Danilith Nokere Koerse — 2026-03-19 (Hilly/Cobbled)
 
 | # | Rider | P(top10) |
 |---|-------|----------|
-| 1 | TEUTENBERG Tim Torn | 0.347 |
-| 2 | PLOWRIGHT Jensen | 0.343 |
-| 3 | DE LIE Arnaud | 0.299 |
-| 4 | BENNETT Sam | 0.279 |
-| 5 | GROENEWEGEN Dylan | 0.264 |
-| 6 | BOL Cees | 0.262 |
-| 7 | SKERL Daniel | 0.237 |
-| 8 | MOLANO Juan Sebastián | 0.235 |
-| 9 | MILAN Matteo | 0.227 |
-| 10 | WALSCHEID Max | 0.182 |
-
-## Bredene Koksijde Classic — 2026-03-27 (Flat)
-
-| # | Rider | P(top10) |
-|---|-------|----------|
-| 1 | BLIKRA Erlend | 0.364 |
-| 2 | TEUTENBERG Tim Torn | 0.356 |
-| 3 | PLOWRIGHT Jensen | 0.343 |
-| 4 | KANTER Max | 0.333 |
-| 5 | FRETIN Milan | 0.307 |
-| 6 | MERLIER Tim | 0.299 |
-| 7 | GROENEWEGEN Dylan | 0.299 |
-| 8 | ANIOŁKOWSKI Stanisław | 0.299 |
-| 9 | THIJSSEN Gerben | 0.298 |
-| 10 | DE SCHUYTENEER Steffen | 0.297 |
+| 1 | BLIKRA Erlend | 0.353 |
+| 2 | PICKRELL Riley | 0.346 |
+| 3 | DE SCHUYTENEER Steffen | 0.336 |
+| 4 | TEUTENBERG Tim Torn | 0.314 |
+| 5 | KANTER Max | 0.273 |
+| 6 | ANIOŁKOWSKI Stanisław | 0.262 |
+| 7 | THIJSSEN Gerben | 0.245 |
+| 8 | MOLANO Juan Sebastián | 0.240 |
+| 9 | EINHORN Itamar | 0.236 |
+| 10 | PHILIPSEN Jasper | 0.215 |
 
 ## Milano-Sanremo — 2026-03-21 (Hilly)
 
 | # | Rider | P(top10) |
 |---|-------|----------|
-| 1 | MILAN Jonathan | 0.385 |
-| 2 | POGAČAR Tadej | 0.373 |
-| 3 | LAMPERTI Luke | 0.345 |
-| 4 | PITHIE Laurence | 0.324 |
-| 5 | DEL TORO Isaac | 0.310 |
-| 6 | BRENNAN Matthew | 0.307 |
-| 7 | ANDRESEN Tobias Lund | 0.292 |
-| 8 | VAN DER POEL Mathieu | 0.267 |
-| 9 | PLUIMERS Rick | 0.255 |
-| 10 | STUYVEN Jasper | 0.249 |
+| 1 | POGAČAR Tadej | 0.461 |
+| 2 | MILAN Jonathan | 0.393 |
+| 3 | DEL TORO Isaac | 0.382 |
+| 4 | JORGENSON Matteo | 0.342 |
+| 5 | BRENNAN Matthew | 0.337 |
+| 6 | PELLIZZARI Giulio | 0.328 |
+| 7 | LAMPERTI Luke | 0.322 |
+| 8 | VAN DER POEL Mathieu | 0.312 |
+| 9 | ANDRESEN Tobias Lund | 0.289 |
+| 10 | PLUIMERS Rick | 0.253 |
+
+## Grand Prix de Denain — 2026-03-25 (Flat/Cobbled)
+
+| # | Rider | P(top10) |
+|---|-------|----------|
+| 1 | TEUTENBERG Tim Torn | 0.292 |
+| 2 | PLOWRIGHT Jensen | 0.261 |
+| 3 | SKERL Daniel | 0.245 |
+| 4 | GROENEWEGEN Dylan | 0.240 |
+| 5 | MILAN Matteo | 0.228 |
+| 6 | MOLANO Juan Sebastián | 0.195 |
+| 7 | ERŽEN Žak | 0.194 |
+| 8 | BENNETT Sam | 0.181 |
+| 9 | TURGIS Anthony | 0.171 |
+| 10 | HUENS Axel | 0.164 |
+
+## Bredene Koksijde Classic — 2026-03-27 (Flat/Cobbled)
+
+| # | Rider | P(top10) |
+|---|-------|----------|
+| 1 | TEUTENBERG Tim Torn | 0.339 |
+| 2 | BLIKRA Erlend | 0.303 |
+| 3 | KANTER Max | 0.274 |
+| 4 | DE SCHUYTENEER Steffen | 0.270 |
+| 5 | ANIOŁKOWSKI Stanisław | 0.262 |
+| 6 | MILAN Matteo | 0.248 |
+| 7 | GROENEWEGEN Dylan | 0.240 |
+| 8 | EINHORN Itamar | 0.239 |
+| 9 | MERLIER Tim | 0.239 |
+| 10 | PLOWRIGHT Jensen | 0.238 |

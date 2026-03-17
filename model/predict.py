@@ -223,7 +223,7 @@ def predict_from_startlist(
 
                 "elevation_per_km": (
                     stage["elevation_m"] / stage["distance_km"]
-                    if stage["distance_km"] else np.nan
+                    if stage["elevation_m"] and stage["distance_km"] else np.nan
                 ),
 
                 "distance_km":    stage["distance_km"],
