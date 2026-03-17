@@ -89,13 +89,24 @@ def _surface_for_race(race_slug: str) -> str:
 def fetch_stage_elevation(stage_slug: str) -> int | None:
     """
     Fetch a stage's detail page and extract elevation gain (vertical meters).
+    Stage pages use div.title / div.value pairs; one-day races use ul.list.
     Returns None if not found or page unavailable.
     """
     url = pcs_url(stage_slug)
     html = fetch(url)
     if not html:
         return None
-    info = _parse_infolist(soup(html))
+    s = soup(html)
+
+    # Stage race pages: <div class="title">Vertical meters:</div><div class="value">1876</div>
+    for div in s.find_all("div", class_="title"):
+        if "vertical" in div.get_text(strip=True).lower():
+            val = div.find_next_sibling("div", class_="value")
+            if val:
+                return _parse_int(val.get_text(strip=True))
+
+    # One-day race fallback: ul.list li structure
+    info = _parse_infolist(s)
     return _parse_int(info.get("vertical meters", "") or info.get("altitude difference", ""))
 
 
