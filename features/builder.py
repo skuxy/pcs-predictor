@@ -24,9 +24,11 @@ FEATURE_COLS = [
     "top10_rate_30d", "top10_rate_90d",
     "win_rate_90d", "dnf_rate_90d",
     "races_last_30d", "days_since_last_race",
+    "race_days_last_7d", "race_days_last_14d",
     "mountain_avg_pos", "flat_avg_pos", "hilly_avg_pos", "tt_avg_pos",
     "hilly_avg_pos_30d", "hilly_avg_pos_90d", "hilly_top10_rate_90d",
     "mountain_avg_pos_90d", "flat_avg_pos_30d",
+    "relevant_avg_pos_30d", "relevant_avg_pos_90d", "relevant_top10_rate_90d",
     "elevation_per_km",
     "distance_km", "elevation_m",
     "stage_num_norm", "is_stage_race",
@@ -36,6 +38,7 @@ FEATURE_COLS = [
     "is_cobbled", "is_gravel",
     "spec_gc", "spec_sprinter", "spec_puncher",
     "spec_classics", "spec_tt", "spec_climber",
+    "gradient_final_km", "profile_score",
 ]
 
 
@@ -64,7 +67,7 @@ def build_features(
             conn,
         )
         stages = pd.read_sql(
-            "SELECT id, race_id, stage_num, date, distance_km, elevation_m, profile_type, surface FROM stages",
+            "SELECT id, race_id, stage_num, date, distance_km, elevation_m, profile_type, surface, gradient_final_km, profile_score FROM stages",
             conn,
         )
         races = pd.read_sql(
@@ -106,7 +109,7 @@ def build_features(
 
     # Join stage date onto results (needed for rolling)
     results = results.merge(
-        stages[["id", "date", "profile_type"]].rename(columns={"id": "stage_id"}),
+        stages[["id", "date", "profile_type", "surface"]].rename(columns={"id": "stage_id"}),
         on="stage_id",
     )
 
@@ -128,7 +131,8 @@ def build_features(
     base = base.merge(
         target_stages[["id", "date", "distance_km", "elevation_m", "profile_type",
                         "surface", "prev_profile_type",
-                        "stage_num_norm", "is_stage_race", "race_name", "race_slug"]].rename(
+                        "stage_num_norm", "is_stage_race", "race_name", "race_slug",
+                        "gradient_final_km", "profile_score"]].rename(
             columns={"id": "stage_id", "date": "stage_date", "profile_type": "stage_profile"}
         ),
         on="stage_id",
@@ -144,26 +148,26 @@ def build_features(
 
     # history = all results with dates, for rolling lookups
     hist = results[["rider_id", "date", "position", "is_finished",
-                     "is_dnf", "is_top10", "is_win", "profile_type", "stage_id"]].copy()
+                     "is_dnf", "is_top10", "is_win", "profile_type", "surface", "stage_id"]].copy()
 
     # Join base (rider, stage_date) onto hist on rider_id, then filter date < stage_date
     # We do this with a merge and then mask — tractable because we group immediately after
     joined = base[["rider_id", "stage_id", "stage_date"]].drop_duplicates().merge(
         hist.rename(columns={
             "date": "hist_date", "stage_id": "hist_stage_id",
-            "profile_type": "hist_profile",
+            "profile_type": "hist_profile", "surface": "hist_surface",
         }),
         on="rider_id",
         how="left",
     )
     # Only past results
     joined = joined[joined["hist_date"] < joined["stage_date"]]
+    joined["_day_delta"] = (joined["stage_date"] - joined["hist_date"]).dt.days
 
     def _rolling(days: int | None, col: str, agg: str) -> pd.Series:
         """Aggregate `col` over the last `days` days, grouped by (rider_id, stage_id)."""
         if days is not None:
-            mask = (joined["stage_date"] - joined["hist_date"]).dt.days <= days
-            sub = joined[mask]
+            sub = joined[joined["_day_delta"] <= days]
         else:
             sub = joined
         if agg == "mean":
@@ -211,17 +215,45 @@ def build_features(
         ("mountain", 90,  "mountain_avg_pos_90d"),
         ("flat",     30,  "flat_avg_pos_30d"),
     ]:
-        mask = (joined["hist_profile"] == ptype) & (
-            (joined["stage_date"] - joined["hist_date"]).dt.days <= days
-        )
+        mask = (joined["hist_profile"] == ptype) & (joined["_day_delta"] <= days)
         series = joined[mask].groupby(["rider_id", "stage_id"])["position"].mean()
         attach(series, col)
 
     hilly_90 = joined[
         (joined["hist_profile"] == "hilly") &
-        ((joined["stage_date"] - joined["hist_date"]).dt.days <= 90)
+        (joined["_day_delta"] <= 90)
     ]
     attach(hilly_90.groupby(["rider_id", "stage_id"])["is_top10"].mean(), "hilly_top10_rate_90d")
+
+    # ── relevant-stage rolling (profile + surface matched) ─────────────────────
+    log.info("computing relevant-stage and fatigue features …")
+
+    # Merge target stage surface into joined
+    stage_meta = (
+        base[["stage_id", "stage_profile", "surface"]]
+        .drop_duplicates("stage_id")
+        .rename(columns={"surface": "target_surface", "stage_profile": "target_profile"})
+    )
+    joined = joined.merge(stage_meta, on="stage_id", how="left")
+    joined["hist_surface"]   = joined["hist_surface"].fillna("road")
+    joined["target_surface"] = joined["target_surface"].fillna("road")
+
+    is_special    = joined["target_surface"].isin(["cobbled", "gravel"])
+    surface_match = (~is_special) | (joined["hist_surface"] == joined["target_surface"])
+    relevant_mask = (joined["hist_profile"] == joined["target_profile"]) & surface_match
+
+    relevant_30 = joined[relevant_mask & (joined["_day_delta"] <= 30)]
+    relevant_90 = joined[relevant_mask & (joined["_day_delta"] <= 90)]
+
+    attach(relevant_30.groupby(["rider_id", "stage_id"])["position"].mean(), "relevant_avg_pos_30d")
+    attach(relevant_90.groupby(["rider_id", "stage_id"])["position"].mean(), "relevant_avg_pos_90d")
+    attach(relevant_90.groupby(["rider_id", "stage_id"])["is_top10"].mean(), "relevant_top10_rate_90d")
+
+    # ── fatigue: calendar days raced ──────────────────────────────────────────
+    race_days_7  = joined[joined["_day_delta"] <= 7 ].groupby(["rider_id", "stage_id"])["hist_date"].nunique()
+    race_days_14 = joined[joined["_day_delta"] <= 14].groupby(["rider_id", "stage_id"])["hist_date"].nunique()
+    attach(race_days_7,  "race_days_last_7d")
+    attach(race_days_14, "race_days_last_14d")
 
     # ── elevation density ─────────────────────────────────────────────────────
     base["elevation_per_km"] = base["elevation_m"] / base["distance_km"].replace(0, np.nan)
@@ -264,7 +296,7 @@ def _load_results(conn) -> pd.DataFrame:
 
 def _load_stages(conn) -> pd.DataFrame:
     return pd.read_sql(
-        "SELECT id, race_id, stage_num, date, distance_km, elevation_m, profile_type, surface FROM stages",
+        "SELECT id, race_id, stage_num, date, distance_km, elevation_m, profile_type, surface, gradient_final_km, profile_score FROM stages",
         conn,
     )
 

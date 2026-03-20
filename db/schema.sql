@@ -41,7 +41,9 @@ CREATE TABLE IF NOT EXISTS stages (
     surface         TEXT DEFAULT 'road', -- road/cobbled/gravel
     departure       TEXT,
     arrival         TEXT,
-    gpx_path        TEXT                -- path to local GPX file if available
+    gpx_path        TEXT,               -- path to local GPX file if available
+    gradient_final_km REAL,             -- avg gradient of final km (%)
+    profile_score     INTEGER            -- PCS ProfileScore
 );
 
 -- Results

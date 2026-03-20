@@ -10,6 +10,15 @@ def init_db(db_path: str = DB_PATH) -> None:
     schema = (pathlib.Path(__file__).parent / "schema.sql").read_text()
     with sqlite3.connect(db_path) as conn:
         conn.executescript(schema)
+        # Migrations for columns added after initial schema
+        for ddl in [
+            "ALTER TABLE stages ADD COLUMN gradient_final_km REAL",
+            "ALTER TABLE stages ADD COLUMN profile_score INTEGER",
+        ]:
+            try:
+                conn.execute(ddl)
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
 
 @contextmanager
@@ -78,20 +87,27 @@ def upsert_race(conn: sqlite3.Connection, data: dict) -> int:
 
 
 def upsert_stage(conn: sqlite3.Connection, data: dict) -> int:
+    data = {**data,
+            "gradient_final_km": data.get("gradient_final_km"),
+            "profile_score":     data.get("profile_score")}
     conn.execute(
         """
         INSERT INTO stages (race_id, stage_num, pcs_slug, date, distance_km,
-                            elevation_m, profile_type, surface, departure, arrival, gpx_path)
+                            elevation_m, profile_type, surface, departure, arrival, gpx_path,
+                            gradient_final_km, profile_score)
         VALUES (:race_id, :stage_num, :pcs_slug, :date, :distance_km,
-                :elevation_m, :profile_type, :surface, :departure, :arrival, :gpx_path)
+                :elevation_m, :profile_type, :surface, :departure, :arrival, :gpx_path,
+                :gradient_final_km, :profile_score)
         ON CONFLICT(pcs_slug) DO UPDATE SET
-            date         = excluded.date,
-            distance_km  = excluded.distance_km,
-            elevation_m  = COALESCE(excluded.elevation_m, stages.elevation_m),
-            profile_type = excluded.profile_type,
-            surface      = excluded.surface,
-            departure    = excluded.departure,
-            arrival      = excluded.arrival
+            date              = excluded.date,
+            distance_km       = excluded.distance_km,
+            elevation_m       = COALESCE(excluded.elevation_m, stages.elevation_m),
+            profile_type      = excluded.profile_type,
+            surface           = excluded.surface,
+            departure         = excluded.departure,
+            arrival           = excluded.arrival,
+            gradient_final_km = COALESCE(excluded.gradient_final_km, stages.gradient_final_km),
+            profile_score     = COALESCE(excluded.profile_score, stages.profile_score)
         """,
         data,
     )

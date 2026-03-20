@@ -12,7 +12,12 @@ SCRAPE_YEARS = [2023, 2024]  # years of results to collect
 
 # Race tiers to include (PCS classification codes)
 # 2.UWT = UCI WorldTour, 2.HC = Hors Categorie, 2.1 = first division
-RACE_CLASSES = ["2.UWT", "2.HC", "2.1", "1.UWT", "1.HC"]
+RACE_CLASSES = ["2.UWT", "2.HC", "2.1", "1.UWT", "1.HC", "1.Pro", "2.Pro"]
+
+# PCS circuit numbers + allowed classes per circuit for men's races.
+# circuit 1  = UCI WorldTour (1.UWT, 2.UWT)
+# circuit 16 = UCI ProSeries (1.Pro, 2.Pro only — 2.1 on this circuit includes women's races)
+MEN_CIRCUITS = {"1": RACE_CLASSES, "16": ["1.Pro", "2.Pro"]}
 
 # Women's WorldTour class codes (circuit=24 on PCS)
 WOMEN_RACE_CLASSES = ["2.WWT", "1.WWT"]

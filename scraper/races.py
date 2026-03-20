@@ -4,29 +4,36 @@ import re
 from typing import Iterator
 
 from scraper.utils import fetch, soup, pcs_url
-from config import SCRAPE_YEARS, RACE_CLASSES, WOMEN_RACE_CLASSES, WOMEN_CIRCUIT, \
-    COBBLED_RACE_SLUGS, GRAVEL_RACE_SLUGS
+from config import SCRAPE_YEARS, MEN_CIRCUITS, COBBLED_RACE_SLUGS, GRAVEL_RACE_SLUGS
 
 log = logging.getLogger(__name__)
 
 
 def iter_races(
     years: list[int] = SCRAPE_YEARS,
-    race_classes: list[str] | None = None,
-    circuit: str = "1",
+    circuits: dict[str, list[str]] | None = None,
 ) -> Iterator[dict]:
-    """Yield race metadata dicts for all configured years and classes."""
-    if race_classes is None:
-        race_classes = RACE_CLASSES
+    """Yield race metadata dicts for all configured years and circuits.
+
+    ``circuits`` maps PCS circuit number → list of allowed race class codes.
+    Defaults to ``MEN_CIRCUITS`` from config.
+    """
+    if circuits is None:
+        circuits = MEN_CIRCUITS
+    seen_slugs: set[str] = set()
     for year in years:
-        url = pcs_url(f"races.php?year={year}&circuit={circuit}&class=")
-        html = fetch(url)
-        if not html:
-            continue
-        yield from _parse_race_list(html, year, race_classes)
+        for circuit, race_classes in circuits.items():
+            url = pcs_url(f"races.php?year={year}&circuit={circuit}&class=")
+            html = fetch(url)
+            if not html:
+                continue
+            for race in _parse_race_list(html, year, race_classes):
+                if race["pcs_slug"] not in seen_slugs:
+                    seen_slugs.add(race["pcs_slug"])
+                    yield race
 
 
-def _parse_race_list(html: str, year: int, race_classes: list[str] = RACE_CLASSES) -> Iterator[dict]:
+def _parse_race_list(html: str, year: int, race_classes: list[str]) -> Iterator[dict]:
     """
     Calendar table columns (verified against live PCS HTML):
       0: date range  e.g. "16.01 - 21.01" or "28.01"
@@ -71,8 +78,22 @@ def _parse_race_list(html: str, year: int, race_classes: list[str] = RACE_CLASSE
             "class": race_class,
             "country": _flag_country(cells[2]),
             "is_stage_race": 1 if is_stage else 0,
-            "gender": "women" if "WWT" in race_class else "men",
+            "gender": _detect_gender(link.get_text(strip=True), race_class),
         }
+
+
+_WOMEN_NAME_RE = re.compile(
+    r"\b(women|ladies|femina|femenina|féminin|vrouwen|dames)\b|\bWE\b",
+    re.IGNORECASE,
+)
+
+def _detect_gender(name: str, race_class: str) -> str:
+    """Return 'women' if the race name or class signals a women's event."""
+    if "WWT" in race_class:
+        return "women"
+    if _WOMEN_NAME_RE.search(name):
+        return "women"
+    return "men"
 
 
 def _surface_for_race(race_slug: str) -> str:
@@ -86,28 +107,91 @@ def _surface_for_race(race_slug: str) -> str:
     return "road"
 
 
+def fetch_result_meta(stage_slug: str) -> dict:
+    """
+    Visit {stage_slug}/result and return a dict with:
+      - profile_type: mapped from p1-p5 span class (flat/hilly/mountain), or None
+      - gradient_final_km: float from "gradient final km" info field, or None
+      - profile_score: int from "profilescore" info field, or None
+
+    Works for both one-day races and multi-stage race stage pages.
+    Returns an empty dict on HTTP failure.
+    """
+    try:
+        result_html = fetch(pcs_url(f"{stage_slug}/result"))
+        if not result_html:
+            return {}
+        s = soup(result_html)
+        info = _parse_infolist(s)
+
+        # gradient final km
+        grad_raw = info.get("gradient final km", "")
+        gradient_final_km = None
+        if grad_raw:
+            try:
+                gradient_final_km = float(re.sub(r"[^\d.]", "", grad_raw.replace(",", ".")))
+            except (ValueError, TypeError):
+                pass
+
+        # profile score
+        score_raw = info.get("profilescore", "")
+        profile_score = None
+        if score_raw:
+            try:
+                profile_score = int(re.sub(r"[^\d]", "", score_raw))
+            except (ValueError, TypeError):
+                pass
+
+        # profile type from p-icon span
+        profile_type = None
+        mapping = {"p1": "flat", "p2": "hilly", "p3": "hilly",
+                   "p4": "mountain", "p5": "mountain"}
+        span = s.find("span", class_=re.compile(r"profile|icon"))
+        if span:
+            cls = " ".join(span.get("class", []))
+            for key, val in mapping.items():
+                if key in cls:
+                    profile_type = val
+                    break
+
+        return {
+            "gradient_final_km": gradient_final_km,
+            "profile_score":     profile_score,
+            "profile_type":      profile_type,
+        }
+    except Exception:
+        return {}
+
+
 def fetch_stage_elevation(stage_slug: str) -> int | None:
     """
     Fetch a stage's detail page and extract elevation gain (vertical meters).
-    Stage pages use div.title / div.value pairs; one-day races use ul.list.
+    For multi-stage races the stage page has a div.title/div.value pair.
+    For one-day races the overview page lacks elevation; fall back to /result.
     Returns None if not found or page unavailable.
     """
-    url = pcs_url(stage_slug)
-    html = fetch(url)
-    if not html:
-        return None
-    s = soup(html)
+    def _elev_from_soup(s) -> int | None:
+        for div in s.find_all("div", class_="title"):
+            if "vertical" in div.get_text(strip=True).lower():
+                val = div.find_next_sibling("div", class_="value")
+                if val:
+                    return _parse_int(val.get_text(strip=True))
+        info = _parse_infolist(s)
+        return _parse_int(info.get("vertical meters", "") or info.get("altitude difference", ""))
 
-    # Stage race pages: <div class="title">Vertical meters:</div><div class="value">1876</div>
-    for div in s.find_all("div", class_="title"):
-        if "vertical" in div.get_text(strip=True).lower():
-            val = div.find_next_sibling("div", class_="value")
-            if val:
-                return _parse_int(val.get_text(strip=True))
+    html = fetch(pcs_url(stage_slug))
+    if html:
+        elev = _elev_from_soup(soup(html))
+        if elev:
+            return elev
 
-    # One-day race fallback: ul.list li structure
-    info = _parse_infolist(s)
-    return _parse_int(info.get("vertical meters", "") or info.get("altitude difference", ""))
+    # One-day races: overview page has no elevation — try /result page
+    if not any(part in stage_slug for part in ["/stage-", "/prologue", "/itt"]):
+        result_html = fetch(pcs_url(f"{stage_slug}/result"))
+        if result_html:
+            return _elev_from_soup(soup(result_html))
+
+    return None
 
 
 def fetch_race_stages(race_slug: str) -> list[dict]:
@@ -195,33 +279,109 @@ def _parse_stages_table(table, race_slug: str, year: int, surface: str = "road")
 def _single_day_stage(race_slug: str, s) -> list[dict]:
     """Build a single pseudo-stage entry for a one-day race."""
     info = _parse_infolist(s)
+
+    # Overview page uses "Startdate:"/"Total distance:"; result page uses "Date:"/"Distance:".
+    # Always fetch the /result page for gradient/profile_score/profile_type,
+    # and use it as date fallback if overview didn't yield a usable date.
+    result_html = fetch(pcs_url(f"{race_slug}/result"))
+    result_info = {}
+    result_profile_type = None
+    gradient_final_km = None
+    profile_score = None
+
+    if result_html:
+        result_s = soup(result_html)
+        result_info = _parse_infolist(result_s)
+
+        # gradient final km
+        grad_raw = result_info.get("gradient final km", "")
+        if grad_raw:
+            try:
+                gradient_final_km = float(re.sub(r"[^\d.]", "", grad_raw.replace(",", ".")))
+            except (ValueError, TypeError):
+                pass
+
+        # profile score
+        score_raw = result_info.get("profilescore", "")
+        if score_raw:
+            try:
+                profile_score = int(re.sub(r"[^\d]", "", score_raw))
+            except (ValueError, TypeError):
+                pass
+
+        # profile type from p-icon span on result page
+        mapping = {"p1": "flat", "p2": "hilly", "p3": "hilly",
+                   "p4": "mountain", "p5": "mountain"}
+        span = result_s.find("span", class_=re.compile(r"profile|icon"))
+        if span:
+            cls = " ".join(span.get("class", []))
+            for key, val in mapping.items():
+                if key in cls:
+                    result_profile_type = val
+                    break
+
+        # Use result_info as date fallback if overview didn't give a date
+        if not info.get("date") and not info.get("startdate"):
+            info = result_info
+
+    raw_date = info.get("date") or info.get("startdate")
+    iso_date = _normalise_date(raw_date)
+
+    # profile_type: prefer overview value, fall back to result page icon
+    overview_profile = info.get("parcours type", "").lower() or None
+    profile_type = overview_profile or result_profile_type
+
     return [{
         "pcs_slug": race_slug,
         "stage_num": None,
-        "date": info.get("date"),
-        "distance_km": _parse_float(info.get("distance", "")),
+        "date": iso_date,
+        "distance_km": _parse_float(
+            info.get("distance", "") or info.get("total distance", "")
+        ),
         "elevation_m": _parse_int(info.get("vertical meters", "")),
-        "profile_type": info.get("parcours type", "").lower() or None,
+        "profile_type": profile_type,
         "surface": _surface_for_race(race_slug),
         "departure": info.get("departure") or info.get("start"),
         "arrival": info.get("arrival") or info.get("finish"),
         "gpx_path": None,
+        "gradient_final_km": gradient_final_km,
+        "profile_score":     profile_score,
     }]
 
 
 def _parse_infolist(s) -> dict:
-    """Parse a ul.list info section into a flat dict (label → value)."""
+    """Parse a ul.list info section into a flat dict (label → value).
+
+    PCS uses div.title/div.value pairs inside ul.list (both race overview and
+    result pages).  Older code looked for div.bold which is only on rider pages.
+    """
     info = {}
     for li in s.select("ul.list li"):
-        label_el = li.find("div", class_="bold")
+        label_el = li.find("div", class_="title")
         if not label_el:
             continue
         label = label_el.get_text(strip=True).rstrip(":").lower()
-        # Value = all sibling divs after the label
-        siblings = label_el.find_next_siblings("div")
-        value = " ".join(d.get_text(strip=True) for d in siblings).strip()
-        info[label] = value
+        val_el = label_el.find_next_sibling("div", class_="value")
+        value = val_el.get_text(strip=True) if val_el else ""
+        if label and value:
+            info[label] = value
     return info
+
+
+def _normalise_date(raw: str | None) -> str | None:
+    """Convert various PCS date formats to ISO YYYY-MM-DD."""
+    if not raw:
+        return None
+    # Already ISO: "2026-02-28"
+    if re.match(r"\d{4}-\d{2}-\d{2}", raw):
+        return raw[:10]
+    # "28 February 2026" / "1 March 2026"
+    try:
+        from datetime import datetime
+        return datetime.strptime(raw.strip(), "%d %B %Y").strftime("%Y-%m-%d")
+    except ValueError:
+        pass
+    return None
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────

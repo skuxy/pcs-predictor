@@ -75,7 +75,8 @@ def predict_from_startlist(
 
         stages = conn.execute(
             "SELECT id, stage_num, date, distance_km, elevation_m, profile_type, "
-            "race_id FROM stages WHERE race_id = ? AND date >= ? ORDER BY date",
+            "surface, gradient_final_km, profile_score, race_id FROM stages "
+            "WHERE race_id = ? AND date >= ? ORDER BY date",
             (race_row["id"], cutoff_date),
         ).fetchall()
 
@@ -95,7 +96,7 @@ def predict_from_startlist(
         ), on="race_id",
     )
     results_df = results_df.merge(
-        stages_all[["id", "date", "profile_type"]].rename(columns={"id": "stage_id"}),
+        stages_all[["id", "date", "profile_type", "surface"]].rename(columns={"id": "stage_id"}),
         on="stage_id",
     )
     results_df["date"] = pd.to_datetime(results_df["date"], errors="coerce")
@@ -115,6 +116,9 @@ def predict_from_startlist(
         stage_num  = stage["stage_num"] or 1
         stage_num_norm = stage_num / race_stage_count
         prev_pt = prev_profile.get(stage["id"])
+        stage_surface = (stage["surface"] or "road") if "surface" in stage.keys() else "road"
+        stage_profile_type = stage["profile_type"]
+        is_special = stage_surface in ("cobbled", "gravel")
 
         for starter in starters:
             # Look up or match rider_id
@@ -176,6 +180,19 @@ def predict_from_startlist(
                 ]
                 return sub["is_top10"].mean() if len(sub) else np.nan
 
+            def relevant_sub(days):
+                if finished.empty: return pd.DataFrame()
+                hist_surf = finished.get("surface", pd.Series("road", index=finished.index)).fillna("road")
+                prof_match = finished["profile_type"] == stage_profile_type
+                surf_match = (hist_surf == stage_surface) if is_special else ~hist_surf.isin(["cobbled", "gravel"])
+                window = finished["date"] >= stage_date - pd.Timedelta(days=days)
+                return finished[prof_match & surf_match & window]
+
+            def count_race_days(days):
+                if history.empty: return 0
+                w = history[history["date"] >= stage_date - pd.Timedelta(days=days)]
+                return int(w["date"].dt.normalize().nunique())
+
             races_30d = 0 if history.empty else \
                 history[history["date"] >= stage_date - pd.Timedelta(days=30)]["stage_id"].nunique()
 
@@ -189,6 +206,9 @@ def predict_from_startlist(
             if not history.empty:
                 history = history.copy()
                 history.loc[:, "is_dnf"] = history["status"].isin(["dnf", "dns", "otl", "dsq"])
+
+            _rel30 = relevant_sub(30)
+            _rel90 = relevant_sub(90)
 
             row = {
                 "rider_id":   rider_id,
@@ -221,6 +241,12 @@ def predict_from_startlist(
                 "mountain_avg_pos_90d": profile_avg_rolling("mountain", 90),
                 "flat_avg_pos_30d":     profile_avg_rolling("flat", 30),
 
+                "relevant_avg_pos_30d":    _rel30["position"].mean() if len(_rel30) else np.nan,
+                "relevant_avg_pos_90d":    _rel90["position"].mean() if len(_rel90) else np.nan,
+                "relevant_top10_rate_90d": _rel90["is_top10"].mean() if len(_rel90) else np.nan,
+                "race_days_last_7d":       count_race_days(7),
+                "race_days_last_14d":      count_race_days(14),
+
                 "elevation_per_km": (
                     stage["elevation_m"] / stage["distance_km"]
                     if stage["elevation_m"] and stage["distance_km"] else np.nan
@@ -235,6 +261,8 @@ def predict_from_startlist(
                 "prev_stage_is_hilly":    int(prev_pt == "hilly")    if prev_pt else 0,
                 "pcs_rank":       pcs_rank,
                 "speciality":     speciality,
+                "gradient_final_km": stage["gradient_final_km"],
+                "profile_score":     stage["profile_score"],
             }
 
             surface = stage["surface"] if "surface" in stage.keys() else "road"

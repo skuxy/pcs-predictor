@@ -8,7 +8,7 @@ from db.database import init_db, get_conn, upsert_race, upsert_stage, upsert_rid
 from scraper.races import iter_races, fetch_race_stages
 from scraper.results import fetch_stage_results
 from scraper.riders import fetch_rider
-from config import SCRAPE_YEARS, DB_PATH, RACE_CLASSES, WOMEN_RACE_CLASSES, WOMEN_CIRCUIT
+from config import SCRAPE_YEARS, DB_PATH, WOMEN_RACE_CLASSES, WOMEN_CIRCUIT, MEN_CIRCUITS
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,12 +29,12 @@ def cmd_scrape(args):
     init_db()
     years = [int(y) for y in args.years.split(",")] if args.years else SCRAPE_YEARS
     if args.gender == "women":
-        race_classes, circuit = WOMEN_RACE_CLASSES, WOMEN_CIRCUIT
+        circuits = {WOMEN_CIRCUIT: WOMEN_RACE_CLASSES}
     else:
-        race_classes, circuit = RACE_CLASSES, "1"
+        circuits = MEN_CIRCUITS
 
     log.info("scraping races for years: %s (gender=%s)", years, args.gender)
-    for race in iter_races(years, race_classes=race_classes, circuit=circuit):
+    for race in iter_races(years, circuits=circuits):
         # Commit per-race so progress is never lost on crash/interrupt
         with get_conn() as conn:
             race_id = upsert_race(conn, race)
@@ -111,10 +111,46 @@ def cmd_predict(args):
 
 
 def cmd_scrape_elevation(args):
-    """Backfill elevation_m for stages that are missing it."""
-    from scraper.races import fetch_stage_elevation
+    """Backfill elevation_m for stages that are missing it.
+
+    Also fixes NULL date/distance/profile_type for one-day stages whose metadata
+    wasn't scraped correctly (e.g. because _parse_infolist used div.bold instead
+    of div.title).
+    """
+    from scraper.races import fetch_stage_elevation, fetch_race_stages, fetch_result_meta
     from db.database import get_conn
 
+    # ── fix one-day stages with NULL date (broken metadata parse) ─────────────
+    with get_conn() as conn:
+        null_meta = conn.execute(
+            """SELECT s.id, s.pcs_slug, r.is_stage_race
+               FROM stages s JOIN races r ON s.race_id = r.id
+               WHERE s.date IS NULL
+               ORDER BY s.id"""
+        ).fetchall()
+
+    log.info("stages with NULL date: %d", len(null_meta))
+    meta_fixed = 0
+    for row in null_meta:
+        stages = fetch_race_stages(row["pcs_slug"]) if not row["is_stage_race"] else []
+        if stages and stages[0].get("date"):
+            s = stages[0]
+            with get_conn() as conn:
+                conn.execute(
+                    """UPDATE stages SET date=?, distance_km=?, elevation_m=?,
+                       profile_type=?, departure=?, arrival=?
+                       WHERE id=?""",
+                    (s["date"], s["distance_km"], s["elevation_m"],
+                     s["profile_type"], s["departure"], s["arrival"], row["id"]),
+                )
+            meta_fixed += 1
+            log.info("  meta fixed: %s → %s", row["pcs_slug"], s["date"])
+        else:
+            log.debug("  no meta found: %s", row["pcs_slug"])
+
+    log.info("meta backfill complete: %d/%d fixed", meta_fixed, len(null_meta))
+
+    # ── backfill elevation_m ───────────────────────────────────────────────────
     with get_conn() as conn:
         rows = conn.execute(
             """SELECT id, pcs_slug FROM stages
@@ -138,6 +174,40 @@ def cmd_scrape_elevation(args):
             log.debug("  %s → no data", row["pcs_slug"])
 
     log.info("elevation backfill complete: %d/%d updated", updated, len(rows))
+
+    # ── backfill gradient_final_km / profile_score / profile_type ─────────────
+    with get_conn() as conn:
+        grad_rows = conn.execute(
+            """SELECT id, pcs_slug FROM stages
+               WHERE gradient_final_km IS NULL
+               ORDER BY id"""
+        ).fetchall()
+
+    log.info("stages missing gradient/profile meta: %d", len(grad_rows))
+    meta_updated = 0
+    for row in grad_rows:
+        meta = fetch_result_meta(row["pcs_slug"])
+        if meta.get("gradient_final_km") is not None or meta.get("profile_score") is not None:
+            with get_conn() as conn:
+                conn.execute(
+                    """UPDATE stages SET
+                       gradient_final_km = COALESCE(?, gradient_final_km),
+                       profile_score     = COALESCE(?, profile_score),
+                       profile_type      = COALESCE(profile_type, ?)
+                       WHERE id = ?""",
+                    (meta.get("gradient_final_km"), meta.get("profile_score"),
+                     meta.get("profile_type"), row["id"]),
+                )
+            meta_updated += 1
+            log.info("  %s → grad=%.1f%% score=%s profile=%s",
+                     row["pcs_slug"],
+                     meta.get("gradient_final_km") or 0,
+                     meta.get("profile_score"),
+                     meta.get("profile_type"))
+        else:
+            log.debug("  no meta: %s", row["pcs_slug"])
+
+    log.info("gradient/profile backfill: %d/%d updated", meta_updated, len(grad_rows))
 
 
 def cmd_tag_surface(args):
