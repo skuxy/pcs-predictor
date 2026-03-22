@@ -210,6 +210,89 @@ def cmd_scrape_elevation(args):
     log.info("gradient/profile backfill: %d/%d updated", meta_updated, len(grad_rows))
 
 
+def cmd_scrape_race(args):
+    """Scrape stages, results, and optionally rider profiles for a single race slug."""
+    init_db()
+    race_slug = args.race_slug
+
+    from scraper.races import fetch_race_stages
+
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id FROM races WHERE pcs_slug = ?", (race_slug,)
+        ).fetchone()
+
+    if not row:
+        log.error(
+            "Race '%s' not found in DB. Run 'scrape' first to populate the calendar, "
+            "or check the slug.",
+            race_slug,
+        )
+        return
+
+    race_id = row["id"]
+    stages = fetch_race_stages(race_slug)
+    if not stages:
+        log.error("No stages found for %s", race_slug)
+        return
+
+    log.info("scraping %d stage(s) for %s", len(stages), race_slug)
+    total_results = 0
+
+    for stage_data in stages:
+        if not stage_data.get("pcs_slug"):
+            log.warning("skipping stage with empty slug in %s", race_slug)
+            continue
+        stage_data["race_id"] = race_id
+        with get_conn() as conn:
+            stage_id = upsert_stage(conn, stage_data)
+
+        results = fetch_stage_results(stage_data["pcs_slug"])
+        if not results:
+            log.warning("no results for stage %s", stage_data["pcs_slug"])
+            continue
+
+        riders_seen: dict[str, int] = {}
+        with get_conn() as conn:
+            for r in results:
+                slug = r["rider_slug"]
+                if slug not in riders_seen:
+                    if not args.skip_riders:
+                        rider = fetch_rider(slug)
+                        if rider:
+                            rider_id = upsert_rider(conn, rider)
+                        else:
+                            rider_id = upsert_rider(conn, {
+                                "pcs_slug": slug, "name": r["rider_name"],
+                                "nationality": None, "dob": None, "team": None,
+                                "pcs_rank": None, "speciality": None,
+                                "weight_kg": None, "height_cm": None,
+                            })
+                    else:
+                        rider_id = upsert_rider(conn, {
+                            "pcs_slug": slug, "name": r["rider_name"],
+                            "nationality": None, "dob": None, "team": None,
+                            "pcs_rank": None, "speciality": None,
+                            "weight_kg": None, "height_cm": None,
+                        })
+                    riders_seen[slug] = rider_id
+
+                insert_result(conn, {
+                    "stage_id": stage_id,
+                    "rider_id": riders_seen[slug],
+                    "position": r["position"],
+                    "status": r["status"],
+                    "time_seconds": r["time_seconds"],
+                    "points_pcs": r["points_pcs"],
+                    "points_uci": r["points_uci"],
+                    "bib": r["bib"],
+                })
+            total_results += len(results)
+            log.info("  stage %s → %d results", stage_data["pcs_slug"], len(results))
+
+    log.info("done: %d total results for %s", total_results, race_slug)
+
+
 def cmd_tag_surface(args):
     """Backfill surface column for existing stages based on race slug."""
     from db.database import get_conn
@@ -336,6 +419,15 @@ def main():
 
     sub.add_parser("tag-surface", help="Backfill cobbled/gravel surface tags") \
        .set_defaults(func=cmd_tag_surface)
+
+    p_scrape_race = sub.add_parser(
+        "scrape-race",
+        help="Scrape stages + results for a single race slug (race must already be in DB)",
+    )
+    p_scrape_race.add_argument("race_slug", help="PCS race slug, e.g. race/milano-sanremo/2026")
+    p_scrape_race.add_argument("--skip-riders", action="store_true",
+                               help="Don't fetch individual rider profiles (faster)")
+    p_scrape_race.set_defaults(func=cmd_scrape_race)
 
     args = parser.parse_args()
     args.func(args)

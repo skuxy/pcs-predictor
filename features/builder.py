@@ -128,9 +128,11 @@ def build_features(
 
     # ── base: one row per (rider, target stage) from results ──────────────────
     base = results[results["stage_id"].isin(target_stages["id"])].copy()
+    # Note: "surface" is already on base from the results→stages join above;
+    # omit it here to avoid a surface_x / surface_y collision on merge.
     base = base.merge(
         target_stages[["id", "date", "distance_km", "elevation_m", "profile_type",
-                        "surface", "prev_profile_type",
+                        "prev_profile_type",
                         "stage_num_norm", "is_stage_race", "race_name", "race_slug",
                         "gradient_final_km", "profile_score"]].rename(
             columns={"id": "stage_id", "date": "stage_date", "profile_type": "stage_profile"}

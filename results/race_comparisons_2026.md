@@ -322,85 +322,176 @@
 
 ---
 
+## Milano-Torino 2026 — 2026-03-18 (Hilly)
+
+> One-day race. AUC 0.759 | Precision@10: 0.40
+
+| # | Predicted | P(top10) | # | Actual |
+|---|-----------|----------|---|--------|
+| 1 | Roglič Primož | 0.387 ✓ | 1 | Pidcock Thomas |
+| 2 | Pidcock Thomas | 0.319 ✓ | 2 | Johannessen Tobias Halland |
+| 3 | Johannessen Tobias Halland | 0.315 ✓ | 3 | Roglič Primož |
+| 4 | Pellizzari Giulio | 0.315 ✓ | 4 | Pellizzari Giulio |
+| 5 | Gee-West Derek | 0.259 | 5 | Uijtdebroeks Cian |
+| 6 | Baudin Alex | 0.198 | 6 | Cepeda Jefferson Alexander |
+| 7 | Ulissi Diego | 0.183 | 7 | Berwick Sebastian |
+| 8 | Christen Jan | 0.166 | 8 | Fortunato Lorenzo |
+| 9 | Tesfatsion Natnael | 0.153 | 9 | Fancellu Alessandro |
+| 10 | Boichis Adrien | 0.140 | 10 | Storer Michael |
+
+*4/10 correct (Roglič ✓, Pidcock ✓, Johannessen ✓, Pellizzari ✓). Top-4 correctly identified, positions shuffled.*
+
+## Danilith Nokere Koerse 2026 — 2026-03-18 (Hilly/Cobbled)
+
+> One-day race. AUC 0.759 | Precision@10: 0.30
+
+| # | Predicted | P(top10) | # | Actual |
+|---|-----------|----------|---|--------|
+| 1 | Blikra Erlend | 0.277 | 1 | Philipsen Jasper |
+| 2 | Meeus Jordi | 0.264 ✓ | 2 | Meeus Jordi |
+| 3 | De Schuyteneer Steffen | 0.246 ✓ | 3 | Molano Juan Sebastián |
+| 4 | Vermeersch Gianni | 0.218 | 4 | Jeannière Emilien |
+| 5 | Philipsen Jasper | 0.150 ✓ | 5 | Menten Milan |
+| 6 | Thijssen Gerben | 0.149 | 6 | Kubiš Lukáš |
+| 7 | Mezgec Luka | 0.135 | 7 | Biermans Jenthe |
+| 8 | Huens Axel | 0.129 | 8 | Penhoët Paul |
+| 9 | Kanter Max | 0.122 | 9 | De Schuyteneer Steffen |
+| 10 | Teutenberg Tim Torn | 0.118 | 10 | Morgado António |
+
+*3/10 correct (Meeus ✓, De Schuyteneer ✓, Philipsen ✓). Winner Philipsen ranked only #5 in predictions.*
+
+## Milano-Sanremo 2026 — 2026-03-21 (Hilly)
+
+> One-day race. AUC 0.942 | Precision@10: 0.40
+
+| # | Predicted | P(top10) | # | Actual |
+|---|-----------|----------|---|--------|
+| 1 | van der Poel Mathieu | 0.416 ✓ | 1 | Pogačar Tadej |
+| 2 | Pogačar Tadej | 0.395 ✓ | 2 | Pidcock Thomas |
+| 3 | Vendrame Andrea | 0.394 ✓ | 3 | van Aert Wout |
+| 4 | Pidcock Thomas | 0.365 ✓ | 4 | Pedersen Mads |
+| 5 | Jorgenson Matteo | 0.365 | 5 | Strong Corbin |
+| 6 | del Toro Isaac | 0.365 | 6 | Vendrame Andrea |
+| 7 | Ciccone Giulio | 0.343 | 7 | Stuyven Jasper |
+| 8 | Grégoire Romain | 0.329 | 8 | van der Poel Mathieu |
+| 9 | Laporte Christophe | 0.321 | 9 | Trentin Matteo |
+| 10 | Roglič Primož | 0.301 | 10 | Zambanini Edoardo |
+
+*4/10 correct (van der Poel ✓, Pogačar ✓, Vendrame ✓, Pidcock ✓). Excellent AUC (0.942). Missed: van Aert, Pedersen, Strong (Corbin), Trentin. Note: our pre-race prediction list had Milan Jonathan #2 (0.393) and del Toro #3 (0.382) — the backtest uses updated model which now uses all actual result data.*
+
+---
+
 # Upcoming Race Predictions
 
-*Model retrained on 2023–2026 data (cutoff 2026-03-09, val Tirreno-Adriatico 2026: AUC 0.856). Includes elevation data, cobbled/gravel surface tags, profile-specific rolling form, and stage context features.*
+*Model retrained on 2023–2026 data (cutoff 2026-03-21, val Milano-Sanremo 2026: AUC 0.942). Includes elevation data, cobbled/gravel surface tags, profile-specific rolling form, and stage context features.*
 
 *Features built from all history up to race start date. Startlists scraped fresh.*
 
 ---
 
-## Milano-Torino — 2026-03-19 (Hilly)
+## Volta a Catalunya 2026 (starts 2026-03-23, 7 stages)
+
+*GC contenders: Vingegaard (dominant on hilly stages), Pidcock (strong recent form), Evenepoel. Godon ranks surprisingly high on mountain stages — watch for breakaway potential.*
+
+| Stage | Date | Profile | Top predicted | P(top10) |
+|-------|------|---------|---------------|----------|
+| 1 | 2026-03-23 | Hilly | Vingegaard Jonas | 0.503 |
+| 2 | 2026-03-24 | Hilly | Vingegaard Jonas | 0.508 |
+| 3 | 2026-03-25 | Mountain | Godon Dorian | 0.394 |
+| 4 | 2026-03-26 | Mountain | Godon Dorian | 0.421 |
+| 5 | 2026-03-27 | Mountain | Godon Dorian | 0.478 |
+| 6 | 2026-03-28 | Mountain | Godon Dorian | 0.556 |
+| 7 | 2026-03-29 | Hilly (final) | Vingegaard Jonas | 0.832 |
+
+**Stage 1 (Hilly):** Vingegaard 0.503 · Pidcock 0.457 · Ciccone 0.384 · Uijtdebroeks 0.331 · Fortunato 0.288
+
+**Stage 2 (Hilly):** Vingegaard 0.508 · Pidcock 0.457 · Ciccone 0.418 · Uijtdebroeks 0.377 · Vernon 0.306
+
+**Stage 3 (Mountain):** Godon 0.394 · Pidcock 0.292 · Ciccone 0.286 · Nordhagen 0.243 · Evenepoel 0.238
+
+**Stage 4 (Mountain):** Godon 0.421 · Pidcock 0.323 · Ciccone 0.255 · Nordhagen 0.241 · Skjelmose 0.238
+
+**Stage 5 (Mountain):** Godon 0.478 · Pidcock 0.400 · Ciccone 0.302 · Vingegaard 0.254 · Nordhagen 0.243
+
+**Stage 6 (Mountain):** Godon 0.556 · Pidcock 0.403 · Ciccone 0.315 · Skjelmose 0.251 · Nordhagen 0.243
+
+**Stage 7 / Final (Hilly):** Vingegaard 0.832 · Pidcock 0.655 · Ciccone 0.580 · Uijtdebroeks 0.506 · Fortunato 0.489
+
+**Predicted GC podium:** Vingegaard – Pidcock – Ciccone
+
+---
+
+## Brugge-De Panne — 2026-03-25 (Flat)
 
 | # | Rider | P(top10) |
 |---|-------|----------|
-| 1 | PELLIZZARI Giulio | 0.299 |
-| 2 | ULISSI Diego | 0.215 |
-| 3 | TESFATSION Natnael | 0.206 |
-| 4 | CARAPAZ Richard | 0.161 |
-| 5 | CHRISTEN Jan | 0.130 |
-| 6 | PESCADOR Diego | 0.118 |
-| 7 | PIDCOCK Thomas | 0.118 |
-| 8 | UIJTDEBROEKS Cian | 0.079 |
-| 9 | RUBIO Einer | 0.065 |
-| 10 | ARANBURU Alex | 0.065 |
-
-## Danilith Nokere Koerse — 2026-03-19 (Hilly/Cobbled)
-
-| # | Rider | P(top10) |
-|---|-------|----------|
-| 1 | BLIKRA Erlend | 0.353 |
-| 2 | PICKRELL Riley | 0.346 |
-| 3 | DE SCHUYTENEER Steffen | 0.336 |
-| 4 | TEUTENBERG Tim Torn | 0.314 |
-| 5 | KANTER Max | 0.273 |
-| 6 | ANIOŁKOWSKI Stanisław | 0.262 |
-| 7 | THIJSSEN Gerben | 0.245 |
-| 8 | MOLANO Juan Sebastián | 0.240 |
-| 9 | EINHORN Itamar | 0.236 |
-| 10 | PHILIPSEN Jasper | 0.215 |
-
-## Milano-Sanremo — 2026-03-21 (Hilly)
-
-| # | Rider | P(top10) |
-|---|-------|----------|
-| 1 | POGAČAR Tadej | 0.461 |
-| 2 | MILAN Jonathan | 0.393 |
-| 3 | DEL TORO Isaac | 0.382 |
-| 4 | JORGENSON Matteo | 0.342 |
-| 5 | BRENNAN Matthew | 0.337 |
-| 6 | PELLIZZARI Giulio | 0.328 |
-| 7 | LAMPERTI Luke | 0.322 |
-| 8 | VAN DER POEL Mathieu | 0.312 |
-| 9 | ANDRESEN Tobias Lund | 0.289 |
-| 10 | PLUIMERS Rick | 0.253 |
+| 1 | PHILIPSEN Jasper | 0.287 |
+| 2 | ANDRESEN Tobias Lund | 0.255 |
+| 3 | BLIKRA Erlend | 0.194 |
+| 4 | RENARD Alexis | 0.169 |
+| 5 | DE LIE Arnaud | 0.164 |
+| 6 | BITTNER Pavel | 0.146 |
+| 7 | FRETIN Milan | 0.140 |
+| 8 | MERLIER Tim | 0.132 |
+| 9 | GROENEWEGEN Dylan | 0.132 |
+| 10 | LAMPERTI Luke | 0.130 |
 
 ## Grand Prix de Denain — 2026-03-25 (Flat/Cobbled)
 
 | # | Rider | P(top10) |
 |---|-------|----------|
-| 1 | TEUTENBERG Tim Torn | 0.292 |
-| 2 | PLOWRIGHT Jensen | 0.261 |
-| 3 | SKERL Daniel | 0.245 |
-| 4 | GROENEWEGEN Dylan | 0.240 |
-| 5 | MILAN Matteo | 0.228 |
-| 6 | MOLANO Juan Sebastián | 0.195 |
-| 7 | ERŽEN Žak | 0.194 |
-| 8 | BENNETT Sam | 0.181 |
-| 9 | TURGIS Anthony | 0.171 |
-| 10 | HUENS Axel | 0.164 |
+| 1 | MEEUS Jordi | 0.286 |
+| 2 | BIERMANS Jenthe | 0.268 |
+| 3 | DE LIE Arnaud | 0.222 |
+| 4 | MENTEN Milan | 0.210 |
+| 5 | TEUTENBERG Tim Torn | 0.201 |
+| 6 | RENARD Alexis | 0.197 |
+| 7 | TURGIS Anthony | 0.191 |
+| 8 | PLOWRIGHT Jensen | 0.184 |
+| 9 | HUENS Axel | 0.183 |
+| 10 | MOLANO Juan Sebastián | 0.175 |
+
+## E3 Saxo Classic — 2026-03-27 (Hilly/Cobbled)
+
+| # | Rider | P(top10) |
+|---|-------|----------|
+| 1 | VAN DER POEL Mathieu | 0.566 |
+| 2 | LAPORTE Christophe | 0.529 |
+| 3 | PEDERSEN Mads | 0.443 |
+| 4 | LAMPERTI Luke | 0.351 |
+| 5 | TURGIS Anthony | 0.337 |
+| 6 | VAN DIJKE Tim | 0.292 |
+| 7 | VERMEERSCH Florian | 0.251 |
+| 8 | GRÉGOIRE Romain | 0.197 |
+| 9 | HUENS Axel | 0.197 |
+| 10 | TRENTIN Matteo | 0.184 |
 
 ## Bredene Koksijde Classic — 2026-03-27 (Flat/Cobbled)
 
 | # | Rider | P(top10) |
 |---|-------|----------|
-| 1 | TEUTENBERG Tim Torn | 0.339 |
-| 2 | BLIKRA Erlend | 0.303 |
-| 3 | KANTER Max | 0.274 |
-| 4 | DE SCHUYTENEER Steffen | 0.270 |
-| 5 | ANIOŁKOWSKI Stanisław | 0.262 |
-| 6 | MILAN Matteo | 0.248 |
-| 7 | GROENEWEGEN Dylan | 0.240 |
-| 8 | EINHORN Itamar | 0.239 |
-| 9 | MERLIER Tim | 0.239 |
-| 10 | PLOWRIGHT Jensen | 0.238 |
+| 1 | DE SCHUYTENEER Steffen | 0.391 |
+| 2 | BLIKRA Erlend | 0.278 |
+| 3 | KANTER Max | 0.255 |
+| 4 | PENHOËT Paul | 0.248 |
+| 5 | JEANNIÈRE Emilien | 0.216 |
+| 6 | TEUTENBERG Tim Torn | 0.198 |
+| 7 | BITTNER Pavel | 0.197 |
+| 8 | RENARD Alexis | 0.193 |
+| 9 | HUENS Axel | 0.183 |
+| 10 | GROENEWEGEN Dylan | 0.181 |
+
+## Gent-Wevelgem — 2026-03-29 (Hilly/Cobbled)
+
+| # | Rider | P(top10) |
+|---|-------|----------|
+| 1 | STUYVEN Jasper | 0.479 |
+| 2 | PITHIE Laurence | 0.410 |
+| 3 | VAN DER POEL Mathieu | 0.364 |
+| 4 | TEUNISSEN Mike | 0.318 |
+| 5 | SHEFFIELD Magnus | 0.314 |
+| 6 | TRENTIN Matteo | 0.309 |
+| 7 | VAN AERT Wout | 0.300 |
+| 8 | BRENNAN Matthew | 0.259 |
+| 9 | MORGADO António | 0.229 |
+| 10 | PEDERSEN Mads | 0.228 |
