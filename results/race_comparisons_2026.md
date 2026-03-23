@@ -391,33 +391,35 @@
 
 ## Volta a Catalunya 2026 (starts 2026-03-23, 7 stages)
 
-*GC contenders: Vingegaard (dominant on hilly stages), Pidcock (strong recent form), Evenepoel. Godon ranks surprisingly high on mountain stages — watch for breakaway potential.*
+*Model retrained cutoff 2026-03-21. Rider profiles fully refreshed from PCS. 2.Pro races Volta Comunitat Valenciana and Volta ao Algarve scraped and included — resolving a data gap for GC riders who skipped early WT rounds (e.g. Almeida, Vine).*
+
+*GC contenders: Evenepoel leads on recent form across all stage types. Ciccone ranked #2 overall on cumulative probability. Godon remains a breakaway threat on mountain stages. Vingegaard dominates the final hilly stage. Known model limitation: GC riders accumulate high position numbers on sprint stages, suppressing their rolling averages — Almeida (P≈0.06 on mountains) and Landa are likely underrated.*
 
 | Stage | Date | Profile | Top predicted | P(top10) |
 |-------|------|---------|---------------|----------|
-| 1 | 2026-03-23 | Hilly | Vingegaard Jonas | 0.503 |
-| 2 | 2026-03-24 | Hilly | Vingegaard Jonas | 0.508 |
-| 3 | 2026-03-25 | Mountain | Godon Dorian | 0.394 |
-| 4 | 2026-03-26 | Mountain | Godon Dorian | 0.421 |
-| 5 | 2026-03-27 | Mountain | Godon Dorian | 0.478 |
-| 6 | 2026-03-28 | Mountain | Godon Dorian | 0.556 |
-| 7 | 2026-03-29 | Hilly (final) | Vingegaard Jonas | 0.832 |
+| 1 | 2026-03-23 | Hilly | Ciccone Giulio | 0.331 |
+| 2 | 2026-03-24 | Hilly | Ciccone Giulio | 0.340 |
+| 3 | 2026-03-25 | Mountain | Evenepoel Remco | 0.328 |
+| 4 | 2026-03-26 | Mountain | Godon Dorian | 0.329 |
+| 5 | 2026-03-27 | Mountain | Godon Dorian | 0.348 |
+| 6 | 2026-03-28 | Mountain | Godon Dorian | 0.348 |
+| 7 | 2026-03-29 | Hilly (final) | Vingegaard Jonas | 0.535 |
 
-**Stage 1 (Hilly):** Vingegaard 0.503 · Pidcock 0.457 · Ciccone 0.384 · Uijtdebroeks 0.331 · Fortunato 0.288
+**Stage 1 (Hilly):** Ciccone 0.331 · Evenepoel 0.326 · Vine 0.301 · Vernon 0.255 · Pidcock 0.234
 
-**Stage 2 (Hilly):** Vingegaard 0.508 · Pidcock 0.457 · Ciccone 0.418 · Uijtdebroeks 0.377 · Vernon 0.306
+**Stage 2 (Hilly):** Ciccone 0.340 · Evenepoel 0.338 · Vine 0.301 · Vernon 0.260 · Vingegaard 0.221
 
-**Stage 3 (Mountain):** Godon 0.394 · Pidcock 0.292 · Ciccone 0.286 · Nordhagen 0.243 · Evenepoel 0.238
+**Stage 3 (Mountain):** Evenepoel 0.328 · Godon 0.302 · Ciccone 0.228 · Vine 0.213 · Gall 0.174
 
-**Stage 4 (Mountain):** Godon 0.421 · Pidcock 0.323 · Ciccone 0.255 · Nordhagen 0.241 · Skjelmose 0.238
+**Stage 4 (Mountain):** Godon 0.329 · Evenepoel 0.320 · Ciccone 0.215 · Vine 0.213 · Gall 0.166
 
-**Stage 5 (Mountain):** Godon 0.478 · Pidcock 0.400 · Ciccone 0.302 · Vingegaard 0.254 · Nordhagen 0.243
+**Stage 5 (Mountain):** Godon 0.348 · Evenepoel 0.338 · Ciccone 0.225 · Vine 0.217 · Gall 0.163
 
-**Stage 6 (Mountain):** Godon 0.556 · Pidcock 0.403 · Ciccone 0.315 · Skjelmose 0.251 · Nordhagen 0.243
+**Stage 6 (Mountain):** Godon 0.348 · Evenepoel 0.333 · Ciccone 0.225 · Vine 0.217 · Gall 0.163
 
-**Stage 7 / Final (Hilly):** Vingegaard 0.832 · Pidcock 0.655 · Ciccone 0.580 · Uijtdebroeks 0.506 · Fortunato 0.489
+**Stage 7 / Final (Hilly):** Vingegaard 0.535 · Ciccone 0.453 · Evenepoel 0.433 · Pidcock 0.371 · Vine 0.324
 
-**Predicted GC podium:** Vingegaard – Pidcock – Ciccone
+**Predicted GC podium:** Evenepoel – Ciccone – Godon (breakaway)/Vine
 
 ---
 
