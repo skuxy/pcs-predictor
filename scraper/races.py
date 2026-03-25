@@ -83,7 +83,7 @@ def _parse_race_list(html: str, year: int, race_classes: list[str]) -> Iterator[
 
 
 _WOMEN_NAME_RE = re.compile(
-    r"\b(women|ladies|femina|femenina|féminin|vrouwen|dames)\b|\bWE\b",
+    r"\b(women|ladies|femina|femenina|féminin|vrouwen|dames|donne|femmes|mujeres)\b|\bWE\b",
     re.IGNORECASE,
 )
 
