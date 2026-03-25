@@ -16,8 +16,9 @@ RACE_CLASSES = ["2.UWT", "2.HC", "2.1", "1.UWT", "1.HC", "1.Pro", "2.Pro"]
 
 # PCS circuit numbers + allowed classes per circuit for men's races.
 # circuit 1  = UCI WorldTour (1.UWT, 2.UWT)
-# circuit 16 = UCI ProSeries (1.Pro, 2.Pro only — 2.1 on this circuit includes women's races)
-MEN_CIRCUITS = {"1": RACE_CLASSES, "16": ["1.Pro", "2.Pro"]}
+# circuit 16 = miscellaneous lower-tier (2.1, some 2.Pro) — also contains women's races; class filter handles them
+# circuit 26 = UCI ProSeries (1.Pro, 2.Pro) — the correct circuit for men's ProSeries
+MEN_CIRCUITS = {"1": RACE_CLASSES, "16": ["2.1", "2.Pro"], "26": ["1.Pro", "2.Pro"]}
 
 # Women's WorldTour class codes (circuit=24 on PCS)
 WOMEN_RACE_CLASSES = ["2.WWT", "1.WWT"]

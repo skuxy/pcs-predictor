@@ -90,6 +90,41 @@ def predict_from_startlist(
         races_df   = _load_races(conn)
         riders_df  = _load_riders(conn)
 
+        # For in-progress stage races: filter starters to only those who
+        # finished the most recently completed stage (removes abandonments).
+        # Only applies when at least one prior stage of this race has results.
+        completed_stage_ids = conn.execute(
+            "SELECT id FROM stages WHERE race_id = ? AND date < ? ORDER BY date DESC",
+            (race_row["id"], cutoff_date),
+        ).fetchall()
+        if completed_stage_ids:
+            latest_stage_id = completed_stage_ids[0]["id"]
+            active_rider_ids = conn.execute(
+                "SELECT rider_id FROM results WHERE stage_id = ? AND status = 'finished'",
+                (latest_stage_id,),
+            ).fetchall()
+            if active_rider_ids:
+                active_set = {r["rider_id"] for r in active_rider_ids}
+                # Map starter slugs to rider_ids for filtering
+                slug_to_id = {
+                    row["pcs_slug"]: row["id"]
+                    for _, row in riders_df[riders_df["pcs_slug"].isin(
+                        [s["slug"] for s in starters]
+                    )].iterrows()
+                } if "pcs_slug" in riders_df.columns else {}
+                before = len(starters)
+                starters = [
+                    s for s in starters
+                    if slug_to_id.get(s["slug"]) in active_set
+                ]
+                dropped = before - len(starters)
+                if dropped:
+                    log.info(
+                        "filtered %d abandoned/DNS riders from startlist "
+                        "(based on last completed stage %d)",
+                        dropped, latest_stage_id,
+                    )
+
     stages_all = stages_all.merge(
         races_df[["id", "pcs_slug", "is_stage_race"]].rename(
             columns={"id": "race_id", "pcs_slug": "race_slug"}
