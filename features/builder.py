@@ -29,6 +29,7 @@ FEATURE_COLS = [
     "hilly_avg_pos_30d", "hilly_avg_pos_90d", "hilly_top10_rate_90d",
     "mountain_avg_pos_90d", "flat_avg_pos_30d",
     "relevant_avg_pos_30d", "relevant_avg_pos_90d", "relevant_top10_rate_90d",
+    "relevant_avg_pos_365d", "relevant_top10_rate_365d",
     "elevation_per_km",
     "distance_km", "elevation_m",
     "stage_num_norm", "is_stage_race",
@@ -247,9 +248,13 @@ def build_features(
     relevant_30 = joined[relevant_mask & (joined["_day_delta"] <= 30)]
     relevant_90 = joined[relevant_mask & (joined["_day_delta"] <= 90)]
 
+    relevant_365 = joined[relevant_mask & (joined["_day_delta"] <= 365)]
+
     attach(relevant_30.groupby(["rider_id", "stage_id"])["position"].mean(), "relevant_avg_pos_30d")
     attach(relevant_90.groupby(["rider_id", "stage_id"])["position"].mean(), "relevant_avg_pos_90d")
     attach(relevant_90.groupby(["rider_id", "stage_id"])["is_top10"].mean(), "relevant_top10_rate_90d")
+    attach(relevant_365.groupby(["rider_id", "stage_id"])["position"].mean(), "relevant_avg_pos_365d")
+    attach(relevant_365.groupby(["rider_id", "stage_id"])["is_top10"].mean(), "relevant_top10_rate_365d")
 
     # ── fatigue: calendar days raced ──────────────────────────────────────────
     race_days_7  = joined[joined["_day_delta"] <= 7 ].groupby(["rider_id", "stage_id"])["hist_date"].nunique()

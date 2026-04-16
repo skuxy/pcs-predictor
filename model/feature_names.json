@@ -22,6 +22,8 @@
   "relevant_avg_pos_30d",
   "relevant_avg_pos_90d",
   "relevant_top10_rate_90d",
+  "relevant_avg_pos_365d",
+  "relevant_top10_rate_365d",
   "elevation_per_km",
   "distance_km",
   "elevation_m",

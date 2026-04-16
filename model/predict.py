@@ -242,8 +242,9 @@ def predict_from_startlist(
                 history = history.copy()
                 history.loc[:, "is_dnf"] = history["status"].isin(["dnf", "dns", "otl", "dsq"])
 
-            _rel30 = relevant_sub(30)
-            _rel90 = relevant_sub(90)
+            _rel30  = relevant_sub(30)
+            _rel90  = relevant_sub(90)
+            _rel365 = relevant_sub(365)
 
             row = {
                 "rider_id":   rider_id,
@@ -276,9 +277,11 @@ def predict_from_startlist(
                 "mountain_avg_pos_90d": profile_avg_rolling("mountain", 90),
                 "flat_avg_pos_30d":     profile_avg_rolling("flat", 30),
 
-                "relevant_avg_pos_30d":    _rel30["position"].mean() if len(_rel30) else np.nan,
-                "relevant_avg_pos_90d":    _rel90["position"].mean() if len(_rel90) else np.nan,
-                "relevant_top10_rate_90d": _rel90["is_top10"].mean() if len(_rel90) else np.nan,
+                "relevant_avg_pos_30d":     _rel30["position"].mean()  if len(_rel30)  else np.nan,
+                "relevant_avg_pos_90d":     _rel90["position"].mean()  if len(_rel90)  else np.nan,
+                "relevant_top10_rate_90d":  _rel90["is_top10"].mean()  if len(_rel90)  else np.nan,
+                "relevant_avg_pos_365d":    _rel365["position"].mean() if len(_rel365) else np.nan,
+                "relevant_top10_rate_365d": _rel365["is_top10"].mean() if len(_rel365) else np.nan,
                 "race_days_last_7d":       count_race_days(7),
                 "race_days_last_14d":      count_race_days(14),
 
