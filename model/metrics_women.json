@@ -1,5 +1,5 @@
 {
-  "val_auc": 0.8535,
-  "val_ap": 0.406,
-  "val_rows": 11683
+  "val_auc": 0.858,
+  "val_ap": 0.472,
+  "val_rows": 122
 }
