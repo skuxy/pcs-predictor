@@ -27,14 +27,15 @@ FEATURE_COLS = [
     "race_days_last_7d", "race_days_last_14d",
     "mountain_avg_pos", "flat_avg_pos", "hilly_avg_pos", "tt_avg_pos",
     "hilly_avg_pos_30d", "hilly_avg_pos_90d", "hilly_top10_rate_90d",
-    "mountain_avg_pos_90d", "flat_avg_pos_30d",
+    "mountain_avg_pos_30d", "mountain_avg_pos_90d", "mountain_top10_rate_90d",
+    "flat_avg_pos_30d", "flat_avg_pos_90d", "flat_top10_rate_90d",
     "relevant_avg_pos_30d", "relevant_avg_pos_90d", "relevant_top10_rate_90d",
     "relevant_avg_pos_365d", "relevant_top10_rate_365d",
     "elevation_per_km",
     "distance_km", "elevation_m",
     "stage_num_norm", "is_stage_race",
     "prev_stage_is_mountain", "prev_stage_is_hilly",
-    "pcs_rank",
+    "pcs_rank", "weight_kg", "height_cm", "age_at_race",
     "is_flat", "is_hilly", "is_mountain", "is_itt", "is_utt",
     "is_cobbled", "is_gravel",
     "spec_gc", "spec_sprinter", "spec_puncher",
@@ -76,7 +77,7 @@ def build_features(
             conn,
         )
         riders = pd.read_sql(
-            "SELECT id, name, pcs_rank, speciality FROM riders",
+            "SELECT id, name, pcs_rank, speciality, weight_kg, height_cm, dob FROM riders",
             conn,
         )
 
@@ -215,18 +216,22 @@ def build_features(
     for ptype, days, col in [
         ("hilly",    30,  "hilly_avg_pos_30d"),
         ("hilly",    90,  "hilly_avg_pos_90d"),
+        ("mountain", 30,  "mountain_avg_pos_30d"),
         ("mountain", 90,  "mountain_avg_pos_90d"),
         ("flat",     30,  "flat_avg_pos_30d"),
+        ("flat",     90,  "flat_avg_pos_90d"),
     ]:
         mask = (joined["hist_profile"] == ptype) & (joined["_day_delta"] <= days)
         series = joined[mask].groupby(["rider_id", "stage_id"])["position"].mean()
         attach(series, col)
 
-    hilly_90 = joined[
-        (joined["hist_profile"] == "hilly") &
-        (joined["_day_delta"] <= 90)
-    ]
-    attach(hilly_90.groupby(["rider_id", "stage_id"])["is_top10"].mean(), "hilly_top10_rate_90d")
+    for ptype, col in [
+        ("hilly",    "hilly_top10_rate_90d"),
+        ("mountain", "mountain_top10_rate_90d"),
+        ("flat",     "flat_top10_rate_90d"),
+    ]:
+        sub = joined[(joined["hist_profile"] == ptype) & (joined["_day_delta"] <= 90)]
+        attach(sub.groupby(["rider_id", "stage_id"])["is_top10"].mean(), col)
 
     # ── relevant-stage rolling (profile + surface matched) ─────────────────────
     log.info("computing relevant-stage and fatigue features …")
@@ -267,11 +272,13 @@ def build_features(
 
     # ── rider attributes ──────────────────────────────────────────────────────
     base = base.merge(
-        riders[["id", "name", "pcs_rank", "speciality"]].rename(
+        riders[["id", "name", "pcs_rank", "speciality", "weight_kg", "height_cm", "dob"]].rename(
             columns={"id": "rider_id", "name": "rider_name"}
         ),
         on="rider_id", how="left",
     )
+    base["dob_dt"] = pd.to_datetime(base["dob"], errors="coerce")
+    base["age_at_race"] = (base["stage_date"] - base["dob_dt"]).dt.days / 365.25
 
     # ── one-hot encode ────────────────────────────────────────────────────────
     for pt in PROFILE_TYPES:
@@ -316,5 +323,6 @@ def _load_races(conn) -> pd.DataFrame:
 
 def _load_riders(conn) -> pd.DataFrame:
     return pd.read_sql(
-        "SELECT id, pcs_slug, name, pcs_rank, speciality FROM riders", conn
+        "SELECT id, pcs_slug, name, pcs_rank, speciality, weight_kg, height_cm, dob FROM riders",
+        conn,
     )

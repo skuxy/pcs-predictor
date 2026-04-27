@@ -67,7 +67,7 @@ def predict_from_startlist(
     with get_conn() as conn:
         # Find upcoming stages for this race
         race_row = conn.execute(
-            "SELECT id FROM races WHERE pcs_slug = ?", (race_slug,)
+            "SELECT id, is_stage_race FROM races WHERE pcs_slug = ?", (race_slug,)
         ).fetchone()
         if not race_row:
             log.warning("race not found in DB: %s", race_slug)
@@ -170,10 +170,23 @@ def predict_from_startlist(
                 rider_id   = None
                 pcs_rank   = np.nan
                 speciality = None
+                weight_kg  = np.nan
+                height_cm  = np.nan
+                dob        = None
             else:
                 rider_id   = match.iloc[0]["id"]
                 pcs_rank   = match.iloc[0].get("pcs_rank", np.nan)
                 speciality = match.iloc[0].get("speciality")
+                weight_kg  = match.iloc[0].get("weight_kg", np.nan)
+                height_cm  = match.iloc[0].get("height_cm", np.nan)
+                dob        = match.iloc[0].get("dob")
+
+            age_at_race = np.nan
+            if dob:
+                try:
+                    age_at_race = (stage_date - pd.to_datetime(dob)).days / 365.25
+                except Exception:
+                    pass
 
             history = pd.DataFrame()
             if rider_id is not None:
@@ -271,11 +284,15 @@ def predict_from_startlist(
                 "hilly_avg_pos":    profile_avg("hilly"),
                 "tt_avg_pos":       profile_avg("itt"),
 
-                "hilly_avg_pos_30d":    profile_avg_rolling("hilly", 30),
-                "hilly_avg_pos_90d":    profile_avg_rolling("hilly", 90),
-                "hilly_top10_rate_90d": profile_top10_rate("hilly", 90),
-                "mountain_avg_pos_90d": profile_avg_rolling("mountain", 90),
-                "flat_avg_pos_30d":     profile_avg_rolling("flat", 30),
+                "hilly_avg_pos_30d":       profile_avg_rolling("hilly", 30),
+                "hilly_avg_pos_90d":       profile_avg_rolling("hilly", 90),
+                "hilly_top10_rate_90d":    profile_top10_rate("hilly", 90),
+                "mountain_avg_pos_30d":    profile_avg_rolling("mountain", 30),
+                "mountain_avg_pos_90d":    profile_avg_rolling("mountain", 90),
+                "mountain_top10_rate_90d": profile_top10_rate("mountain", 90),
+                "flat_avg_pos_30d":        profile_avg_rolling("flat", 30),
+                "flat_avg_pos_90d":        profile_avg_rolling("flat", 90),
+                "flat_top10_rate_90d":     profile_top10_rate("flat", 90),
 
                 "relevant_avg_pos_30d":     _rel30["position"].mean()  if len(_rel30)  else np.nan,
                 "relevant_avg_pos_90d":     _rel90["position"].mean()  if len(_rel90)  else np.nan,
@@ -294,10 +311,13 @@ def predict_from_startlist(
                 "elevation_m":    stage["elevation_m"],
                 "profile_type":   stage["profile_type"],
                 "stage_num_norm": stage_num_norm,
-                "is_stage_race":  1,
+                "is_stage_race":  race_row["is_stage_race"] or 0,
                 "prev_stage_is_mountain": int(prev_pt == "mountain") if prev_pt else 0,
                 "prev_stage_is_hilly":    int(prev_pt == "hilly")    if prev_pt else 0,
                 "pcs_rank":       pcs_rank,
+                "weight_kg":      weight_kg,
+                "height_cm":      height_cm,
+                "age_at_race":    age_at_race,
                 "speciality":     speciality,
                 "gradient_final_km": stage["gradient_final_km"],
                 "profile_score":     stage["profile_score"],

@@ -19,6 +19,10 @@ def init_db(db_path: str = DB_PATH) -> None:
                 conn.execute(ddl)
             except sqlite3.OperationalError:
                 pass  # column already exists
+        # Data migration: PCS "Hills" category is now mapped to "climber"
+        conn.execute(
+            "UPDATE riders SET speciality='climber' WHERE speciality='puncher'"
+        )
 
 
 @contextmanager

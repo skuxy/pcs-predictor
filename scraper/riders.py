@@ -161,7 +161,7 @@ def _parse_speciality(s) -> str | None:
         "gc": "gc",
         "tt": "tt",
         "sprint": "sprinter",
-        "hills": "puncher",
+        "hills": "climber",
     }
     for key, val in mapping.items():
         if key in best_label:

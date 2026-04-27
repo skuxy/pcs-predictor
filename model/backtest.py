@@ -62,6 +62,7 @@ def backtest(race_slug: str, cutoff_date: str, top_n: int = 10, gender: str = "m
 
         stage_metrics.append({
             "date":      stage_date,
+            "profile":   group["profile_type"].iloc[0] if "profile_type" in group.columns else "?",
             "precision": precision,
             "recall":    recall,
             "hits":      hits,
@@ -96,6 +97,19 @@ def backtest(race_slug: str, cutoff_date: str, top_n: int = 10, gender: str = "m
     print(f"  Avg recall@10    : {sm['recall'].mean():.3f}")
     print(f"  Overall AUC      : {auc:.4f}")
     print(f"  Overall AP       : {ap:.4f}")
+
+    if "profile" in sm.columns and len(sm) > 1:
+        print(f"\n  Precision@10 by profile type:")
+        for profile, grp in sm.groupby("profile"):
+            profile_known = known[known["profile_type"] == profile] if "profile_type" in known.columns else pd.DataFrame()
+            p_auc = (
+                roc_auc_score(profile_known["top10"], profile_known["top10_prob"])
+                if len(profile_known) and profile_known["top10"].nunique() > 1
+                else float("nan")
+            )
+            auc_str = f"  AUC={p_auc:.3f}" if not np.isnan(p_auc) else ""
+            print(f"    {profile:<10}  precision={grp['precision'].mean():.3f}{auc_str}  ({len(grp)} stage{'s' if len(grp) != 1 else ''})")
+
     print(f"{'='*70}\n")
 
     # GC leaderboard: who appeared in predicted top-10 most often?
