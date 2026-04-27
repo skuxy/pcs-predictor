@@ -72,6 +72,15 @@ def _fetch_with_playwright(url: str) -> Optional[str]:
                 )
             except Exception:
                 pass  # if it times out we still try to grab whatever content is there
+            # For result pages: wait up to 5 s for the results table to have data rows
+            try:
+                page.wait_for_function(
+                    "() => { var t = document.querySelector('table.results, table.basic'); "
+                    "return t && t.querySelectorAll('tr').length > 1; }",
+                    timeout=5_000,
+                )
+            except Exception:
+                pass
             html = page.content()
             browser.close()
             if _is_cloudflare_challenge(html):

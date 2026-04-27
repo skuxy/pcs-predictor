@@ -36,13 +36,22 @@ def fetch_stage_results(stage_slug: str) -> list[dict]:
     s = soup(html)
     # First table.results is the stage finish table
     table = s.select_one("table.results")
+    if table and len(table.select("tr")) <= 1:
+        table = None  # empty JS skeleton — ignore
     if not table:
-        # One-day races have results at /result suffix
+        # One-day races have results at /result suffix (JS-rendered)
         alt_url = pcs_url(stage_slug.rstrip("/") + "/result")
         alt_html = fetch(alt_url)
         if alt_html:
-            s = soup(alt_html)
-            table = s.select_one("table.results")
+            alt_s = soup(alt_html)
+            alt_table = alt_s.select_one("table.results")
+            if alt_table and len(alt_table.select("tr")) > 1:
+                table = alt_table
+    if not table:
+        # Fallback: main page may have a table.basic with top-10
+        table = s.select_one("table.basic")
+        if table and len(table.select("tr")) <= 1:
+            table = None
     if not table:
         log.warning("no results table on %s", stage_slug)
         return []
@@ -51,10 +60,37 @@ def fetch_stage_results(stage_slug: str) -> list[dict]:
 
 
 def _parse_results_table(table) -> list[dict]:
+    # Detect table.basic layout (no class-annotated cells — simpler structure)
+    is_basic = "basic" in (table.get("class") or [])
+
     results = []
     for row in table.select("tr"):
         cells = row.find_all("td")
         if not cells:
+            continue
+
+        if is_basic:
+            # table.basic: td[0]=pos, td[1]=rider (a href), td[2]=team, td[3]=time
+            if len(cells) < 2:
+                continue
+            rider_link = cells[1].find("a", href=re.compile(r"rider/")) if len(cells) > 1 else None
+            if not rider_link:
+                continue
+            rider_slug = rider_link["href"].strip("/").replace("rider/", "")
+            rider_name = rider_link.get_text(separator=" ", strip=True)
+            pos_raw = cells[0].get_text(strip=True)
+            position, status = _parse_position(pos_raw)
+            time_seconds = 0 if position == 1 else None
+            results.append({
+                "rider_slug": rider_slug,
+                "rider_name": rider_name,
+                "position": position,
+                "status": status,
+                "time_seconds": time_seconds,
+                "points_pcs": None,
+                "points_uci": None,
+                "bib": None,
+            })
             continue
 
         # Rider link
