@@ -29,6 +29,8 @@ FEATURE_COLS = [
     "hilly_avg_pos_30d", "hilly_avg_pos_90d", "hilly_top10_rate_90d",
     "mountain_avg_pos_30d", "mountain_avg_pos_90d", "mountain_top10_rate_90d",
     "flat_avg_pos_30d", "flat_avg_pos_90d", "flat_top10_rate_90d",
+    "tt_avg_pos_90d", "tt_avg_pos_365d", "tt_top10_rate_365d", "tt_win_rate",
+    "tt_win_rate_x_itt", "tt_avg_pos_365d_x_itt", "tt_avg_pos_90d_x_itt",
     "relevant_avg_pos_30d", "relevant_avg_pos_90d", "relevant_top10_rate_90d",
     "relevant_avg_pos_365d", "relevant_top10_rate_365d",
     "elevation_per_km",
@@ -220,6 +222,8 @@ def build_features(
         ("mountain", 90,  "mountain_avg_pos_90d"),
         ("flat",     30,  "flat_avg_pos_30d"),
         ("flat",     90,  "flat_avg_pos_90d"),
+        ("itt",      90,  "tt_avg_pos_90d"),
+        ("itt",      365, "tt_avg_pos_365d"),
     ]:
         mask = (joined["hist_profile"] == ptype) & (joined["_day_delta"] <= days)
         series = joined[mask].groupby(["rider_id", "stage_id"])["position"].mean()
@@ -229,9 +233,15 @@ def build_features(
         ("hilly",    "hilly_top10_rate_90d"),
         ("mountain", "mountain_top10_rate_90d"),
         ("flat",     "flat_top10_rate_90d"),
+        ("itt",      "tt_top10_rate_365d"),
     ]:
-        sub = joined[(joined["hist_profile"] == ptype) & (joined["_day_delta"] <= 90)]
+        days = 90 if ptype != "itt" else 365
+        sub = joined[(joined["hist_profile"] == ptype) & (joined["_day_delta"] <= days)]
         attach(sub.groupby(["rider_id", "stage_id"])["is_top10"].mean(), col)
+
+    # ITT win rate (all-time) — highly distinctive for pure TT specialists
+    itt_sub = joined[joined["hist_profile"] == "itt"]
+    attach(itt_sub.groupby(["rider_id", "stage_id"])["is_win"].mean(), "tt_win_rate")
 
     # ── relevant-stage rolling (profile + surface matched) ─────────────────────
     log.info("computing relevant-stage and fatigue features …")
@@ -295,6 +305,14 @@ def build_features(
     base = base.drop(columns=["profile_type"], errors="ignore").rename(columns={
         "stage_profile": "profile_type",
     })
+
+    # ── ITT interaction features ──────────────────────────────────────────────
+    # Explicit interactions so the model can learn "TT form matters *on ITT stages*"
+    # without needing many examples to discover the split on is_itt internally.
+    is_itt = base["profile_type"] == "itt"
+    base["tt_win_rate_x_itt"]      = base["tt_win_rate"].fillna(0)      * is_itt.astype(int)
+    base["tt_avg_pos_365d_x_itt"]  = base["tt_avg_pos_365d"].fillna(50) * is_itt.astype(int)
+    base["tt_avg_pos_90d_x_itt"]   = base["tt_avg_pos_90d"].fillna(50)  * is_itt.astype(int)
 
     log.info("features built: %d rows, %d columns", len(base), len(base.columns))
     return base

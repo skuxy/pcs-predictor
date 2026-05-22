@@ -293,6 +293,13 @@ def predict_from_startlist(
                 "flat_avg_pos_30d":        profile_avg_rolling("flat", 30),
                 "flat_avg_pos_90d":        profile_avg_rolling("flat", 90),
                 "flat_top10_rate_90d":     profile_top10_rate("flat", 90),
+                "tt_avg_pos_90d":          profile_avg_rolling("itt", 90),
+                "tt_avg_pos_365d":         profile_avg_rolling("itt", 365),
+                "tt_top10_rate_365d":      profile_top10_rate("itt", 365),
+                "tt_win_rate": (
+                    finished[finished["profile_type"] == "itt"]["is_win"].mean()
+                    if not finished.empty else np.nan
+                ),
 
                 "relevant_avg_pos_30d":     _rel30["position"].mean()  if len(_rel30)  else np.nan,
                 "relevant_avg_pos_90d":     _rel90["position"].mean()  if len(_rel90)  else np.nan,
@@ -331,6 +338,15 @@ def predict_from_startlist(
                 row[f"is_{pt}"] = int(stage["profile_type"] == pt) if stage["profile_type"] else 0
             for sp in SPECIALITIES:
                 row[f"spec_{sp}"] = int(speciality == sp) if speciality else 0
+
+            # ITT interaction features
+            is_itt_stage = int(stage["profile_type"] == "itt") if stage["profile_type"] else 0
+            tt_wr   = row.get("tt_win_rate") or 0
+            tt_365  = row.get("tt_avg_pos_365d") or 50
+            tt_90   = row.get("tt_avg_pos_90d") or 50
+            row["tt_win_rate_x_itt"]     = (tt_wr  if not np.isnan(tt_wr)  else 0)  * is_itt_stage
+            row["tt_avg_pos_365d_x_itt"] = (tt_365 if not np.isnan(tt_365) else 50) * is_itt_stage
+            row["tt_avg_pos_90d_x_itt"]  = (tt_90  if not np.isnan(tt_90)  else 50) * is_itt_stage
 
             rows.append(row)
 

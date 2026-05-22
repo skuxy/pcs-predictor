@@ -142,17 +142,21 @@ def fetch_result_meta(stage_slug: str) -> dict:
             except (ValueError, TypeError):
                 pass
 
-        # profile type from p-icon span
+        # profile type: check "Won how" first (reliable ITT signal), then p-icon span
         profile_type = None
-        mapping = {"p1": "flat", "p2": "hilly", "p3": "hilly",
-                   "p4": "mountain", "p5": "mountain"}
-        span = s.find("span", class_=re.compile(r"profile|icon"))
-        if span:
-            cls = " ".join(span.get("class", []))
-            for key, val in mapping.items():
-                if key in cls:
-                    profile_type = val
-                    break
+        won_how = info.get("won how", "").lower()
+        if "time trial" in won_how:
+            profile_type = "itt"
+        else:
+            mapping = {"p1": "flat", "p2": "hilly", "p3": "hilly",
+                       "p4": "mountain", "p5": "mountain", "itt": "itt", "utt": "utt"}
+            span = s.find("span", class_=re.compile(r"profile|icon"))
+            if span:
+                cls = " ".join(span.get("class", []))
+                for key, val in mapping.items():
+                    if key in cls:
+                        profile_type = val
+                        break
 
         return {
             "gradient_final_km": gradient_final_km,
@@ -252,8 +256,17 @@ def _parse_stages_table(table, race_slug: str, year: int, surface: str = "road")
         # date: "16/01" → year inferred from race slug
         date_str = _parse_stage_date(cells[0].get_text(strip=True), year)
 
-        # "Stage 1 | Tanunda - Tanunda" → split on |
+        # "Stage 1 | Tanunda - Tanunda" or "Stage 10 (ITT) | Town - Town"
         text = link.get_text(strip=True)
+
+        # Override profile_type for time trials — PCS puts (ITT)/(TTT) in the
+        # stage name but uses the generic p1 icon, so the icon-based detection
+        # always produces "flat" for TT stages.
+        if "(ITT)" in text:
+            profile_type = "itt"
+        elif "(TTT)" in text:
+            profile_type = "utt"
+
         parts = text.split("|", 1)
         departure, arrival = None, None
         if len(parts) == 2:
