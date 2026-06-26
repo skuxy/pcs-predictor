@@ -1,5 +1,6 @@
 """CLI entry point for the PCS predictor pipeline."""
 import argparse
+import datetime
 import logging
 import sys
 from pathlib import Path
@@ -16,6 +17,77 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger(__name__)
+
+
+def _scrape_race_results(race_id: int, race_slug: str, skip_riders: bool) -> int:
+    """Fetch and store results for all stages of one race. Returns total results inserted.
+
+    Skips stages that already have results in the DB (idempotent re-runs).
+    """
+    stages = fetch_race_stages(race_slug)
+    if not stages:
+        log.warning("no stages found for %s", race_slug)
+        return 0
+
+    total = 0
+    for stage_data in stages:
+        if not stage_data.get("pcs_slug"):
+            log.warning("skipping stage with empty slug in %s", race_slug)
+            continue
+        stage_data["race_id"] = race_id
+
+        with get_conn() as conn:
+            stage_id = upsert_stage(conn, stage_data)
+            existing = conn.execute(
+                "SELECT COUNT(*) FROM results WHERE stage_id = ?", (stage_id,)
+            ).fetchone()[0]
+
+        if existing > 0:
+            log.info("  stage %s already has %d results — skipping", stage_data["pcs_slug"], existing)
+            total += existing
+            continue
+
+        results = fetch_stage_results(stage_data["pcs_slug"])
+        if not results:
+            log.warning("no results for stage %s", stage_data["pcs_slug"])
+            continue
+
+        riders_seen: dict[str, int] = {}
+        with get_conn() as conn:
+            for r in results:
+                slug = r["rider_slug"]
+                if slug not in riders_seen:
+                    if not skip_riders:
+                        rider = fetch_rider(slug)
+                        rider_id = upsert_rider(conn, rider if rider else {
+                            "pcs_slug": slug, "name": r["rider_name"],
+                            "nationality": None, "dob": None, "team": None,
+                            "pcs_rank": None, "speciality": None,
+                            "weight_kg": None, "height_cm": None,
+                        })
+                    else:
+                        rider_id = upsert_rider(conn, {
+                            "pcs_slug": slug, "name": r["rider_name"],
+                            "nationality": None, "dob": None, "team": None,
+                            "pcs_rank": None, "speciality": None,
+                            "weight_kg": None, "height_cm": None,
+                        })
+                    riders_seen[slug] = rider_id
+
+                insert_result(conn, {
+                    "stage_id": stage_id,
+                    "rider_id": riders_seen[slug],
+                    "position": r["position"],
+                    "status": r["status"],
+                    "time_seconds": r["time_seconds"],
+                    "points_pcs": r["points_pcs"],
+                    "points_uci": r["points_uci"],
+                    "bib": r["bib"],
+                })
+            total += len(results)
+            log.info("  stage %s → %d results", stage_data["pcs_slug"], len(results))
+
+    return total
 
 
 def cmd_init(_args):
@@ -35,55 +107,10 @@ def cmd_scrape(args):
 
     log.info("scraping races for years: %s (gender=%s)", years, args.gender)
     for race in iter_races(years, circuits=circuits):
-        # Commit per-race so progress is never lost on crash/interrupt
         with get_conn() as conn:
             race_id = upsert_race(conn, race)
-            log.info("race: %s (id=%d)", race["name"], race_id)
-
-            stages = fetch_race_stages(race["pcs_slug"])
-            for stage_data in stages:
-                if not stage_data.get("pcs_slug"):
-                    log.warning("skipping stage with empty slug in %s", race["name"])
-                    continue
-                stage_data["race_id"] = race_id
-                stage_id = upsert_stage(conn, stage_data)
-
-                results = fetch_stage_results(stage_data["pcs_slug"])
-                riders_seen: dict[str, int] = {}
-
-                for r in results:
-                    slug = r["rider_slug"]
-                    if slug not in riders_seen:
-                        if not args.skip_riders:
-                            rider = fetch_rider(slug)
-                            if rider:
-                                rider_id = upsert_rider(conn, rider)
-                            else:
-                                rider_id = upsert_rider(conn, {
-                                    "pcs_slug": slug, "name": r["rider_name"],
-                                    "nationality": None, "dob": None, "team": None,
-                                    "pcs_rank": None, "speciality": None,
-                                    "weight_kg": None, "height_cm": None,
-                                })
-                        else:
-                            rider_id = upsert_rider(conn, {
-                                "pcs_slug": slug, "name": r["rider_name"],
-                                "nationality": None, "dob": None, "team": None,
-                                "pcs_rank": None, "speciality": None,
-                                "weight_kg": None, "height_cm": None,
-                            })
-                        riders_seen[slug] = rider_id
-
-                    insert_result(conn, {
-                        "stage_id": stage_id,
-                        "rider_id": riders_seen[slug],
-                        "position": r["position"],
-                        "status": r["status"],
-                        "time_seconds": r["time_seconds"],
-                        "points_pcs": r["points_pcs"],
-                        "points_uci": r["points_uci"],
-                        "bib": r["bib"],
-                    })
+        log.info("race: %s (id=%d)", race["name"], race_id)
+        _scrape_race_results(race_id, race["pcs_slug"], args.skip_riders)
 
     log.info("scraping complete")
 
@@ -215,8 +242,6 @@ def cmd_scrape_race(args):
     init_db()
     race_slug = args.race_slug
 
-    from scraper.races import fetch_race_stages
-
     with get_conn() as conn:
         row = conn.execute(
             "SELECT id FROM races WHERE pcs_slug = ?", (race_slug,)
@@ -230,67 +255,39 @@ def cmd_scrape_race(args):
         )
         return
 
-    race_id = row["id"]
-    stages = fetch_race_stages(race_slug)
-    if not stages:
-        log.error("No stages found for %s", race_slug)
-        return
+    log.info("scraping %s", race_slug)
+    total = _scrape_race_results(row["id"], race_slug, args.skip_riders)
+    log.info("done: %d total results for %s", total, race_slug)
 
-    log.info("scraping %d stage(s) for %s", len(stages), race_slug)
-    total_results = 0
 
-    for stage_data in stages:
-        if not stage_data.get("pcs_slug"):
-            log.warning("skipping stage with empty slug in %s", race_slug)
-            continue
-        stage_data["race_id"] = race_id
-        with get_conn() as conn:
-            stage_id = upsert_stage(conn, stage_data)
+def cmd_scrape_missing(args):
+    """Scrape all finished races in DB that have no results yet."""
+    init_db()
+    today = datetime.date.today().isoformat()
+    year = args.year
 
-        results = fetch_stage_results(stage_data["pcs_slug"])
-        if not results:
-            log.warning("no results for stage %s", stage_data["pcs_slug"])
-            continue
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT r.id, r.pcs_slug, r.name, r.end_date
+            FROM races r
+            WHERE r.year = ?
+              AND r.end_date < ?
+              AND r.id NOT IN (
+                SELECT DISTINCT s.race_id FROM stages s
+                JOIN results res ON res.stage_id = s.id
+              )
+            ORDER BY r.end_date
+            """,
+            (year, today),
+        ).fetchall()
 
-        riders_seen: dict[str, int] = {}
-        with get_conn() as conn:
-            for r in results:
-                slug = r["rider_slug"]
-                if slug not in riders_seen:
-                    if not args.skip_riders:
-                        rider = fetch_rider(slug)
-                        if rider:
-                            rider_id = upsert_rider(conn, rider)
-                        else:
-                            rider_id = upsert_rider(conn, {
-                                "pcs_slug": slug, "name": r["rider_name"],
-                                "nationality": None, "dob": None, "team": None,
-                                "pcs_rank": None, "speciality": None,
-                                "weight_kg": None, "height_cm": None,
-                            })
-                    else:
-                        rider_id = upsert_rider(conn, {
-                            "pcs_slug": slug, "name": r["rider_name"],
-                            "nationality": None, "dob": None, "team": None,
-                            "pcs_rank": None, "speciality": None,
-                            "weight_kg": None, "height_cm": None,
-                        })
-                    riders_seen[slug] = rider_id
+    log.info("found %d races with no results (year=%d, ended before %s)", len(rows), year, today)
+    for i, row in enumerate(rows, 1):
+        log.info("[%d/%d] %s (%s, ended %s)", i, len(rows), row["name"], row["pcs_slug"], row["end_date"])
+        _scrape_race_results(row["id"], row["pcs_slug"], skip_riders=True)
 
-                insert_result(conn, {
-                    "stage_id": stage_id,
-                    "rider_id": riders_seen[slug],
-                    "position": r["position"],
-                    "status": r["status"],
-                    "time_seconds": r["time_seconds"],
-                    "points_pcs": r["points_pcs"],
-                    "points_uci": r["points_uci"],
-                    "bib": r["bib"],
-                })
-            total_results += len(results)
-            log.info("  stage %s → %d results", stage_data["pcs_slug"], len(results))
-
-    log.info("done: %d total results for %s", total_results, race_slug)
+    log.info("scrape-missing complete")
 
 
 def cmd_tag_surface(args):
@@ -428,6 +425,14 @@ def main():
     p_scrape_race.add_argument("--skip-riders", action="store_true",
                                help="Don't fetch individual rider profiles (faster)")
     p_scrape_race.set_defaults(func=cmd_scrape_race)
+
+    p_scrape_missing = sub.add_parser(
+        "scrape-missing",
+        help="Scrape all finished races in DB that have no results yet",
+    )
+    p_scrape_missing.add_argument("--year", type=int, default=2026,
+                                  help="Calendar year to backfill (default: 2026)")
+    p_scrape_missing.set_defaults(func=cmd_scrape_missing)
 
     args = parser.parse_args()
     args.func(args)

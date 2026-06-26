@@ -2,9 +2,18 @@
 import logging
 import re
 
-from scraper.utils import fetch, soup, pcs_url, parse_time_gap
+from scraper.utils import fetch, soup, pcs_url, parse_time_gap, _fetch_with_playwright, _cache_path
 
 log = logging.getLogger(__name__)
+
+
+def _try_playwright(url: str):
+    """Fetch url via Playwright, overwriting the stale cache entry. Returns soup or None."""
+    pw_html = _fetch_with_playwright(url)
+    if not pw_html:
+        return None
+    _cache_path(url).write_text(pw_html, encoding="utf-8")
+    return soup(pw_html)
 
 
 def fetch_stage_results(stage_slug: str) -> list[dict]:
@@ -36,8 +45,19 @@ def fetch_stage_results(stage_slug: str) -> list[dict]:
     s = soup(html)
     # First table.results is the stage finish table
     table = s.select_one("table.results")
+
+    # Empty JS skeleton in cache — try Playwright to get JS-rendered data
     if table and len(table.select("tr")) <= 1:
-        table = None  # empty JS skeleton — ignore
+        log.info("empty JS skeleton on %s — retrying with Playwright", stage_slug)
+        pw_s = _try_playwright(url)
+        if pw_s:
+            table = pw_s.select_one("table.results")
+            if table and len(table.select("tr")) <= 1:
+                table = None
+            s = pw_s
+        else:
+            table = None
+
     if not table:
         # One-day races have results at /result suffix (JS-rendered)
         alt_url = pcs_url(stage_slug.rstrip("/") + "/result")
@@ -45,8 +65,17 @@ def fetch_stage_results(stage_slug: str) -> list[dict]:
         if alt_html:
             alt_s = soup(alt_html)
             alt_table = alt_s.select_one("table.results")
+            if alt_table and len(alt_table.select("tr")) <= 1:
+                # Also a JS skeleton — try Playwright for /result URL
+                log.info("empty JS skeleton on %s/result — retrying with Playwright", stage_slug)
+                pw_s = _try_playwright(alt_url)
+                if pw_s:
+                    alt_table = pw_s.select_one("table.results")
+                    if alt_table and len(alt_table.select("tr")) <= 1:
+                        alt_table = None
             if alt_table and len(alt_table.select("tr")) > 1:
                 table = alt_table
+
     if not table:
         # Fallback: main page may have a table.basic with top-10
         table = s.select_one("table.basic")
