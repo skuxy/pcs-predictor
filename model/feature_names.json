@@ -50,7 +50,7 @@
   "is_hilly",
   "is_mountain",
   "is_itt",
-  "is_utt",
+  "is_ttt",
   "is_cobbled",
   "is_gravel",
   "spec_gc",

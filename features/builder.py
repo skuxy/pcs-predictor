@@ -16,7 +16,7 @@ from db.database import get_conn
 
 log = logging.getLogger(__name__)
 
-PROFILE_TYPES = ["flat", "hilly", "mountain", "itt", "utt"]
+PROFILE_TYPES = ["flat", "hilly", "mountain", "itt", "ttt"]
 SPECIALITIES  = ["gc", "sprinter", "puncher", "classics", "tt", "climber"]
 
 FEATURE_COLS = [
@@ -38,7 +38,7 @@ FEATURE_COLS = [
     "stage_num_norm", "is_stage_race",
     "prev_stage_is_mountain", "prev_stage_is_hilly",
     "pcs_rank", "weight_kg", "height_cm", "age_at_race",
-    "is_flat", "is_hilly", "is_mountain", "is_itt", "is_utt",
+    "is_flat", "is_hilly", "is_mountain", "is_itt", "is_ttt",
     "is_cobbled", "is_gravel",
     "spec_gc", "spec_sprinter", "spec_puncher",
     "spec_classics", "spec_tt", "spec_climber",
@@ -170,6 +170,10 @@ def build_features(
     joined = joined[joined["hist_date"] < joined["stage_date"]]
     joined["_day_delta"] = (joined["stage_date"] - joined["hist_date"]).dt.days
 
+    # TTT results reflect team performance, not individual ability — exclude
+    # them from general rolling form so they don't inflate/distort rider metrics.
+    joined_ind = joined[joined["hist_profile"] != "ttt"]
+
     def _rolling(days: int | None, col: str, agg: str) -> pd.Series:
         """Aggregate `col` over the last `days` days, grouped by (rider_id, stage_id)."""
         if days is not None:
@@ -191,16 +195,29 @@ def build_features(
     def attach(series: pd.Series, name: str):
         base[name] = base.set_index(["rider_id", "stage_id"]).index.map(series).values
 
-    attach(_rolling(30,  "position",    "mean"),  "avg_pos_30d")
-    attach(_rolling(60,  "position",    "mean"),  "avg_pos_60d")
-    attach(_rolling(90,  "position",    "mean"),  "avg_pos_90d")
-    attach(_rolling(30,  "is_top10",    "mean"),  "top10_rate_30d")
-    attach(_rolling(90,  "is_top10",    "mean"),  "top10_rate_90d")
-    attach(_rolling(90,  "is_win",      "mean"),  "win_rate_90d")
-    attach(_rolling(90,  "is_dnf",      "mean"),  "dnf_rate_90d")
-    attach(_rolling(30,  "hist_stage_id","count"), "races_last_30d")
+    def _rolling_ind(days: int | None, col: str, agg: str) -> pd.Series:
+        """Like _rolling but on joined_ind (TTT stages excluded)."""
+        sub = joined_ind[joined_ind["_day_delta"] <= days] if days is not None else joined_ind
+        if agg == "mean":
+            return sub.groupby(["rider_id", "stage_id"])[col].mean()
+        if agg == "sum":
+            return sub.groupby(["rider_id", "stage_id"])[col].sum()
+        if agg == "count":
+            return sub.groupby(["rider_id", "stage_id"])[col].count()
+        if agg == "max_date":
+            return sub.groupby(["rider_id", "stage_id"])["hist_date"].max()
+        raise ValueError(agg)
 
-    last_race = _rolling(None, "hist_date", "max_date")
+    attach(_rolling_ind(30,  "position",    "mean"),  "avg_pos_30d")
+    attach(_rolling_ind(60,  "position",    "mean"),  "avg_pos_60d")
+    attach(_rolling_ind(90,  "position",    "mean"),  "avg_pos_90d")
+    attach(_rolling_ind(30,  "is_top10",    "mean"),  "top10_rate_30d")
+    attach(_rolling_ind(90,  "is_top10",    "mean"),  "top10_rate_90d")
+    attach(_rolling_ind(90,  "is_win",      "mean"),  "win_rate_90d")
+    attach(_rolling_ind(90,  "is_dnf",      "mean"),  "dnf_rate_90d")
+    attach(_rolling_ind(30,  "hist_stage_id","count"), "races_last_30d")
+
+    last_race = _rolling_ind(None, "hist_date", "max_date")
     last_race_mapped = base.set_index(["rider_id", "stage_id"]).index.map(last_race)
     base["days_since_last_race"] = (
         base["stage_date"].values - pd.to_datetime(last_race_mapped).values

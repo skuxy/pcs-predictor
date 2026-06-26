@@ -149,7 +149,7 @@ def fetch_result_meta(stage_slug: str) -> dict:
             profile_type = "itt"
         else:
             mapping = {"p1": "flat", "p2": "hilly", "p3": "hilly",
-                       "p4": "mountain", "p5": "mountain", "itt": "itt", "utt": "utt"}
+                       "p4": "mountain", "p5": "mountain", "itt": "itt", "utt": "ttt"}
             span = s.find("span", class_=re.compile(r"profile|icon"))
             if span:
                 cls = " ".join(span.get("class", []))
@@ -265,7 +265,7 @@ def _parse_stages_table(table, race_slug: str, year: int, surface: str = "road")
         if "(ITT)" in text:
             profile_type = "itt"
         elif "(TTT)" in text:
-            profile_type = "utt"
+            profile_type = "ttt"
 
         parts = text.split("|", 1)
         departure, arrival = None, None
@@ -435,7 +435,7 @@ def _profile_from_icon(cell) -> str | None:
         return None
     cls = " ".join(span.get("class", []))
     mapping = {"p1": "flat", "p2": "hilly", "p3": "hilly",
-               "p4": "mountain", "p5": "mountain", "itt": "itt", "utt": "utt"}
+               "p4": "mountain", "p5": "mountain", "itt": "itt", "utt": "ttt"}
     for key, val in mapping.items():
         if key in cls:
             return val
