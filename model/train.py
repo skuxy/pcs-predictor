@@ -84,7 +84,13 @@ def train(
     model.fit(X_train, y_train)
 
     # Metrics
-    metrics: dict = {}
+    metrics: dict = {
+        "train_cutoff": train_cutoff,
+        "val_race": val_race_slug,
+        "gender": gender,
+        "train_rows": len(train_df),
+        "n_features": len(FEATURE_COLS),
+    }
     if len(val_df) and y_val.nunique() > 1:
         val_proba = model.predict_proba(X_val)[:, 1]
         metrics["val_auc"]  = round(float(roc_auc_score(y_val, val_proba)), 4)

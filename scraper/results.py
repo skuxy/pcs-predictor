@@ -93,6 +93,9 @@ def _parse_results_table(table) -> list[dict]:
     is_basic = "basic" in (table.get("class") or [])
 
     results = []
+    # PCS renders ",," (ditto) when a rider's gap equals the previous row's —
+    # the previous rider's gap, NOT the leader's. Carry it forward.
+    last_gap = 0
     for row in table.select("tr"):
         cells = row.find_all("td")
         if not cells:
@@ -144,13 +147,16 @@ def _parse_results_table(table) -> list[dict]:
         time_seconds = None
         if position == 1:
             time_seconds = 0
-        elif time_cell:
+            last_gap = 0
+        elif position is not None and time_cell:
             font = time_cell.find("font")
             raw_time = font.get_text(strip=True) if font else ""
             if raw_time == ",," or raw_time == "":
-                time_seconds = 0   # same time as leader
+                time_seconds = last_gap
             else:
                 time_seconds = parse_time_gap(raw_time)
+                if time_seconds is not None:
+                    last_gap = time_seconds
 
         # Points
         uci_pnt = _cell_int(row.select_one("td.uci_pnt"))

@@ -43,7 +43,50 @@ FEATURE_COLS = [
     "spec_gc", "spec_sprinter", "spec_puncher",
     "spec_classics", "spec_tt", "spec_climber",
     "gradient_final_km", "profile_score",
+    "gc_deficit_min", "gc_rank_before",
+    "break_top10_rate_365d", "break_top10s_365d",
 ]
+
+
+def _gc_state(results: pd.DataFrame, stages: pd.DataFrame) -> pd.DataFrame:
+    """
+    GC standing of each rider immediately BEFORE each stage-race stage.
+
+    `results` needs [stage_id, rider_id, time_seconds, status]; `stages` needs
+    [id, race_id, date, is_stage_race]. Returns one row per stage-race result
+    where the rider has at least one prior stage in the same race, with
+    gc_deficit_min (minutes behind the virtual leader) and gc_rank_before.
+
+    time_seconds is the gap behind the stage winner, so cumulative gaps
+    approximate GC gaps (bonus seconds ignored). Missing stage times
+    contribute 0 rather than invalidating the rider's whole GC.
+    """
+    st = stages[["id", "race_id", "date", "is_stage_race"]].rename(
+        columns={"id": "stage_id"}
+    )
+    df = results[["stage_id", "rider_id", "time_seconds", "status"]].merge(
+        st, on="stage_id"
+    )
+    df = df[df["is_stage_race"].fillna(0).astype(int) == 1].copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date"]).sort_values(
+        ["race_id", "rider_id", "date"], kind="stable"
+    )
+
+    gap = df["time_seconds"].where(df["status"] == "finished").fillna(0.0)
+    grp = [df["race_id"], df["rider_id"]]
+    df["_cum_before"] = gap.groupby(grp).cumsum() - gap
+    df["_n_before"] = gap.groupby(grp).cumcount()
+
+    valid = df[df["_n_before"] >= 1].copy()
+    if valid.empty:
+        return pd.DataFrame(
+            columns=["stage_id", "rider_id", "gc_deficit_min", "gc_rank_before"]
+        )
+    leader = valid.groupby("stage_id")["_cum_before"].transform("min")
+    valid["gc_deficit_min"] = (valid["_cum_before"] - leader) / 60.0
+    valid["gc_rank_before"] = valid.groupby("stage_id")["_cum_before"].rank(method="min")
+    return valid[["stage_id", "rider_id", "gc_deficit_min", "gc_rank_before"]]
 
 
 def build_features(
@@ -111,6 +154,10 @@ def build_features(
     results["is_top10"]    = (results["position"] <= 10) & results["position"].notna()
     results["is_win"]      = results["position"] == 1
 
+    # GC standing before each stage (stage races only; NaN elsewhere)
+    gc = _gc_state(results, stages)
+    results = results.merge(gc, on=["stage_id", "rider_id"], how="left")
+
     # Join stage date onto results (needed for rolling)
     results = results.merge(
         stages[["id", "date", "profile_type", "surface"]].rename(columns={"id": "stage_id"}),
@@ -154,7 +201,8 @@ def build_features(
 
     # history = all results with dates, for rolling lookups
     hist = results[["rider_id", "date", "position", "is_finished",
-                     "is_dnf", "is_top10", "is_win", "profile_type", "surface", "stage_id"]].copy()
+                     "is_dnf", "is_top10", "is_win", "profile_type", "surface", "stage_id",
+                     "gc_rank_before"]].copy()
 
     # Join base (rider, stage_date) onto hist on rider_id, then filter date < stage_date
     # We do this with a merge and then mask — tractable because we group immediately after
@@ -162,6 +210,7 @@ def build_features(
         hist.rename(columns={
             "date": "hist_date", "stage_id": "hist_stage_id",
             "profile_type": "hist_profile", "surface": "hist_surface",
+            "gc_rank_before": "hist_gc_rank",
         }),
         on="rider_id",
         how="left",
@@ -294,6 +343,16 @@ def build_features(
     attach(race_days_7,  "race_days_last_7d")
     attach(race_days_14, "race_days_last_14d")
 
+    # ── breakaway propensity ──────────────────────────────────────────────────
+    # Top-10s scored while starting the stage >20th on GC come from breakaways,
+    # not the favourites' group — a distinct skill the form features miss.
+    break_sub = joined_ind[
+        (joined_ind["hist_gc_rank"] > 20) & (joined_ind["_day_delta"] <= 365)
+    ]
+    attach(break_sub.groupby(["rider_id", "stage_id"])["is_top10"].mean(), "break_top10_rate_365d")
+    attach(break_sub.groupby(["rider_id", "stage_id"])["is_top10"].sum(),  "break_top10s_365d")
+    base["break_top10s_365d"] = base["break_top10s_365d"].fillna(0)
+
     # ── elevation density ─────────────────────────────────────────────────────
     base["elevation_per_km"] = base["elevation_m"] / base["distance_km"].replace(0, np.nan)
 
@@ -339,7 +398,7 @@ def build_features(
 
 def _load_results(conn) -> pd.DataFrame:
     return pd.read_sql(
-        "SELECT id, stage_id, rider_id, position, status FROM results", conn
+        "SELECT id, stage_id, rider_id, position, status, time_seconds FROM results", conn
     )
 
 

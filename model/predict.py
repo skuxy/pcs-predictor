@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from features.builder import build_features, FEATURE_COLS, _load_results, _load_stages, _load_races, _load_riders
+from features.builder import build_features, FEATURE_COLS, _gc_state, _load_results, _load_stages, _load_races, _load_riders
 from model.train import model_paths
 from db.database import get_conn
 
@@ -130,11 +130,29 @@ def predict_from_startlist(
             columns={"id": "race_id", "pcs_slug": "race_slug"}
         ), on="race_id",
     )
+    # GC standing before each historical stage (feeds breakaway propensity)
+    gc_hist = _gc_state(results_df, stages_all)
+    results_df = results_df.merge(gc_hist, on=["stage_id", "rider_id"], how="left")
+
     results_df = results_df.merge(
         stages_all[["id", "date", "profile_type", "surface"]].rename(columns={"id": "stage_id"}),
         on="stage_id",
     )
     results_df["date"] = pd.to_datetime(results_df["date"], errors="coerce")
+
+    # Current GC state of the ongoing race, as of the cutoff. Future stages all
+    # get this snapshot — the best available estimate of their start-line GC.
+    gc_deficit_now: dict = {}
+    gc_rank_now: dict = {}
+    comp_ids = [r["id"] for r in completed_stage_ids]
+    if comp_ids:
+        cur = results_df[
+            results_df["stage_id"].isin(comp_ids) & (results_df["status"] == "finished")
+        ]
+        cum = cur.groupby("rider_id")["time_seconds"].sum()
+        if len(cum):
+            gc_deficit_now = ((cum - cum.min()) / 60.0).to_dict()
+            gc_rank_now = cum.rank(method="min").to_dict()
 
     race_stage_count = len(stages)
 
@@ -259,6 +277,14 @@ def predict_from_startlist(
             _rel90  = relevant_sub(90)
             _rel365 = relevant_sub(365)
 
+            _brk = pd.DataFrame()
+            if not finished.empty and "gc_rank_before" in finished.columns:
+                _brk = finished[
+                    (finished["gc_rank_before"] > 20)
+                    & (finished["date"] >= stage_date - pd.Timedelta(days=365))
+                    & (finished["profile_type"] != "ttt")
+                ]
+
             row = {
                 "rider_id":   rider_id,
                 "stage_id":   stage["id"],
@@ -328,6 +354,11 @@ def predict_from_startlist(
                 "speciality":     speciality,
                 "gradient_final_km": stage["gradient_final_km"],
                 "profile_score":     stage["profile_score"],
+
+                "gc_deficit_min": gc_deficit_now.get(rider_id, np.nan),
+                "gc_rank_before": gc_rank_now.get(rider_id, np.nan),
+                "break_top10_rate_365d": _brk["is_top10"].mean() if len(_brk) else np.nan,
+                "break_top10s_365d":     float(_brk["is_top10"].sum()) if len(_brk) else 0.0,
             }
 
             surface = stage["surface"] if "surface" in stage.keys() else "road"
