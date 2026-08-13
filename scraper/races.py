@@ -1,12 +1,32 @@
 """Scrape race schedules and stage lists from ProCyclingStats."""
 import logging
 import re
+from datetime import datetime
 from typing import Iterator
 
 from scraper.utils import fetch, soup, pcs_url
 from config import SCRAPE_YEARS, MEN_CIRCUITS, COBBLED_RACE_SLUGS, GRAVEL_RACE_SLUGS
 
 log = logging.getLogger(__name__)
+
+# Maps PCS profile-icon CSS classes to profile type strings.
+_PROFILE_MAP = {
+    "p1": "flat", "p2": "hilly", "p3": "hilly",
+    "p4": "mountain", "p5": "mountain",
+    "itt": "itt", "utt": "ttt",
+}
+
+
+def _profile_from_span(s) -> str | None:
+    """Return profile type from a BeautifulSoup element containing a profile/icon span."""
+    span = s.find("span", class_=re.compile(r"profile|icon"))
+    if not span:
+        return None
+    cls = " ".join(span.get("class", []))
+    for key, val in _PROFILE_MAP.items():
+        if key in cls:
+            return val
+    return None
 
 
 def iter_races(
@@ -125,22 +145,10 @@ def fetch_result_meta(stage_slug: str) -> dict:
         info = _parse_infolist(s)
 
         # gradient final km
-        grad_raw = info.get("gradient final km", "")
-        gradient_final_km = None
-        if grad_raw:
-            try:
-                gradient_final_km = float(re.sub(r"[^\d.]", "", grad_raw.replace(",", ".")))
-            except (ValueError, TypeError):
-                pass
+        gradient_final_km = _parse_float(info.get("gradient final km", ""))
 
         # profile score
-        score_raw = info.get("profilescore", "")
-        profile_score = None
-        if score_raw:
-            try:
-                profile_score = int(re.sub(r"[^\d]", "", score_raw))
-            except (ValueError, TypeError):
-                pass
+        profile_score = _parse_int(info.get("profilescore", ""))
 
         # profile type: check "Won how" first (reliable ITT signal), then p-icon span
         profile_type = None
@@ -148,15 +156,7 @@ def fetch_result_meta(stage_slug: str) -> dict:
         if "time trial" in won_how:
             profile_type = "itt"
         else:
-            mapping = {"p1": "flat", "p2": "hilly", "p3": "hilly",
-                       "p4": "mountain", "p5": "mountain", "itt": "itt", "utt": "ttt"}
-            span = s.find("span", class_=re.compile(r"profile|icon"))
-            if span:
-                cls = " ".join(span.get("class", []))
-                for key, val in mapping.items():
-                    if key in cls:
-                        profile_type = val
-                        break
+            profile_type = _profile_from_span(s)
 
         return {
             "gradient_final_km": gradient_final_km,
@@ -219,7 +219,7 @@ def fetch_race_stages(race_slug: str) -> list[dict]:
         return _parse_stages_table(stage_table, race_slug, year, surface=surface)
 
     # One-day race — use the /result page info
-    return _single_day_stage(race_slug, s)
+    return _single_day_stage(race_slug, s, surface=surface)
 
 
 def _find_stages_table(s):
@@ -246,7 +246,7 @@ def _parse_stages_table(table, race_slug: str, year: int, surface: str = "road")
         if len(cells) < 4:
             continue
 
-        link = cells[3].find("a") if len(cells) > 3 else None
+        link = cells[3].find("a")
         if not link:
             continue
 
@@ -289,8 +289,10 @@ def _parse_stages_table(table, race_slug: str, year: int, surface: str = "road")
     return stages
 
 
-def _single_day_stage(race_slug: str, s) -> list[dict]:
+def _single_day_stage(race_slug: str, s, surface: str | None = None) -> list[dict]:
     """Build a single pseudo-stage entry for a one-day race."""
+    if surface is None:
+        surface = _surface_for_race(race_slug)
     info = _parse_infolist(s)
 
     # Overview page uses "Startdate:"/"Total distance:"; result page uses "Date:"/"Distance:".
@@ -306,32 +308,9 @@ def _single_day_stage(race_slug: str, s) -> list[dict]:
         result_s = soup(result_html)
         result_info = _parse_infolist(result_s)
 
-        # gradient final km
-        grad_raw = result_info.get("gradient final km", "")
-        if grad_raw:
-            try:
-                gradient_final_km = float(re.sub(r"[^\d.]", "", grad_raw.replace(",", ".")))
-            except (ValueError, TypeError):
-                pass
-
-        # profile score
-        score_raw = result_info.get("profilescore", "")
-        if score_raw:
-            try:
-                profile_score = int(re.sub(r"[^\d]", "", score_raw))
-            except (ValueError, TypeError):
-                pass
-
-        # profile type from p-icon span on result page
-        mapping = {"p1": "flat", "p2": "hilly", "p3": "hilly",
-                   "p4": "mountain", "p5": "mountain"}
-        span = result_s.find("span", class_=re.compile(r"profile|icon"))
-        if span:
-            cls = " ".join(span.get("class", []))
-            for key, val in mapping.items():
-                if key in cls:
-                    result_profile_type = val
-                    break
+        gradient_final_km = _parse_float(result_info.get("gradient final km", ""))
+        profile_score = _parse_int(result_info.get("profilescore", ""))
+        result_profile_type = _profile_from_span(result_s)
 
         # Use result_info as date fallback if overview didn't give a date
         if not info.get("date") and not info.get("startdate"):
@@ -353,7 +332,7 @@ def _single_day_stage(race_slug: str, s) -> list[dict]:
         ),
         "elevation_m": _parse_int(info.get("vertical meters", "")),
         "profile_type": profile_type,
-        "surface": _surface_for_race(race_slug),
+        "surface": surface,
         "departure": info.get("departure") or info.get("start"),
         "arrival": info.get("arrival") or info.get("finish"),
         "gpx_path": None,
@@ -390,7 +369,6 @@ def _normalise_date(raw: str | None) -> str | None:
         return raw[:10]
     # "28 February 2026" / "1 March 2026"
     try:
-        from datetime import datetime
         return datetime.strptime(raw.strip(), "%d %B %Y").strftime("%Y-%m-%d")
     except ValueError:
         pass
@@ -430,16 +408,7 @@ def _parse_stage_date(raw: str, year: int | None) -> str | None:
 
 def _profile_from_icon(cell) -> str | None:
     """Read the profile type from the icon span class in the stages table."""
-    span = cell.find("span", class_=re.compile(r"profile|icon"))
-    if not span:
-        return None
-    cls = " ".join(span.get("class", []))
-    mapping = {"p1": "flat", "p2": "hilly", "p3": "hilly",
-               "p4": "mountain", "p5": "mountain", "itt": "itt", "utt": "ttt"}
-    for key, val in mapping.items():
-        if key in cls:
-            return val
-    return None
+    return _profile_from_span(cell)
 
 
 def _flag_country(cell) -> str | None:

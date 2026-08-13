@@ -59,7 +59,6 @@ def _compute_gc_ranks(results: pd.DataFrame, stages: pd.DataFrame) -> pd.DataFra
     if valid.empty:
         return pd.DataFrame(columns=["stage_id", "rider_id", "gc_rank_before"])
 
-    leader = valid.groupby("stage_id")["_cum_before"].transform("min")
     valid["gc_rank_before"] = valid.groupby("stage_id")["_cum_before"].rank(method="min")
 
     winners = valid[valid["position"] == 1][["stage_id", "gc_rank_before"]]

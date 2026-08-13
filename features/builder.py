@@ -257,29 +257,11 @@ def build_features(
     # them from general rolling form so they don't inflate/distort rider metrics.
     joined_ind = joined[joined["hist_profile"] != "ttt"]
 
-    def _rolling(days: int | None, col: str, agg: str) -> pd.Series:
-        """Aggregate `col` over the last `days` days, grouped by (rider_id, stage_id)."""
-        if days is not None:
-            sub = joined[joined["_day_delta"] <= days]
-        else:
-            sub = joined
-        if agg == "mean":
-            return sub.groupby(["rider_id", "stage_id"])[col].mean()
-        if agg == "sum":
-            return sub.groupby(["rider_id", "stage_id"])[col].sum()
-        if agg == "count":
-            return sub.groupby(["rider_id", "stage_id"])[col].count()
-        if agg == "max_date":
-            return sub.groupby(["rider_id", "stage_id"])["hist_date"].max()
-        raise ValueError(agg)
-
-    key = base.set_index(["rider_id", "stage_id"])
-
     def attach(series: pd.Series, name: str):
         base[name] = base.set_index(["rider_id", "stage_id"]).index.map(series).values
 
-    def _rolling_ind(days: int | None, col: str, agg: str) -> pd.Series:
-        """Like _rolling but on joined_ind (TTT stages excluded)."""
+    def _rolling(days: int | None, col: str, agg: str) -> pd.Series:
+        """Aggregate `col` over the last `days` days on joined_ind (TTT stages excluded)."""
         sub = joined_ind[joined_ind["_day_delta"] <= days] if days is not None else joined_ind
         if agg == "mean":
             return sub.groupby(["rider_id", "stage_id"])[col].mean()
@@ -291,16 +273,16 @@ def build_features(
             return sub.groupby(["rider_id", "stage_id"])["hist_date"].max()
         raise ValueError(agg)
 
-    attach(_rolling_ind(30,  "position",    "mean"),  "avg_pos_30d")
-    attach(_rolling_ind(60,  "position",    "mean"),  "avg_pos_60d")
-    attach(_rolling_ind(90,  "position",    "mean"),  "avg_pos_90d")
-    attach(_rolling_ind(30,  "is_top10",    "mean"),  "top10_rate_30d")
-    attach(_rolling_ind(90,  "is_top10",    "mean"),  "top10_rate_90d")
-    attach(_rolling_ind(90,  "is_win",      "mean"),  "win_rate_90d")
-    attach(_rolling_ind(90,  "is_dnf",      "mean"),  "dnf_rate_90d")
-    attach(_rolling_ind(30,  "hist_stage_id","count"), "races_last_30d")
+    attach(_rolling(30,  "position",    "mean"),  "avg_pos_30d")
+    attach(_rolling(60,  "position",    "mean"),  "avg_pos_60d")
+    attach(_rolling(90,  "position",    "mean"),  "avg_pos_90d")
+    attach(_rolling(30,  "is_top10",    "mean"),  "top10_rate_30d")
+    attach(_rolling(90,  "is_top10",    "mean"),  "top10_rate_90d")
+    attach(_rolling(90,  "is_win",      "mean"),  "win_rate_90d")
+    attach(_rolling(90,  "is_dnf",      "mean"),  "dnf_rate_90d")
+    attach(_rolling(30,  "hist_stage_id","count"), "races_last_30d")
 
-    last_race = _rolling_ind(None, "hist_date", "max_date")
+    last_race = _rolling(None, "hist_date", "max_date")
     last_race_mapped = base.set_index(["rider_id", "stage_id"]).index.map(last_race)
     base["days_since_last_race"] = (
         base["stage_date"].values - pd.to_datetime(last_race_mapped).values
@@ -514,30 +496,3 @@ def build_features(
     log.info("features built: %d rows, %d columns", len(base), len(base.columns))
     return base
 
-
-# ── DB loaders (also used by predict.py for start-list predictions) ───────────
-
-def _load_results(conn) -> pd.DataFrame:
-    return pd.read_sql(
-        "SELECT id, stage_id, rider_id, position, status, time_seconds FROM results", conn
-    )
-
-
-def _load_stages(conn) -> pd.DataFrame:
-    return pd.read_sql(
-        "SELECT id, race_id, stage_num, date, distance_km, elevation_m, profile_type, surface, gradient_final_km, profile_score FROM stages",
-        conn,
-    )
-
-
-def _load_races(conn) -> pd.DataFrame:
-    return pd.read_sql(
-        "SELECT id, pcs_slug, name, year, is_stage_race FROM races", conn
-    )
-
-
-def _load_riders(conn) -> pd.DataFrame:
-    return pd.read_sql(
-        "SELECT id, pcs_slug, name, team, pcs_rank, speciality, weight_kg, height_cm, dob FROM riders",
-        conn,
-    )

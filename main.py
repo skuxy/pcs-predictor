@@ -19,6 +19,15 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+def _stub_rider(slug: str, name: str) -> dict:
+    return {
+        "pcs_slug": slug, "name": name,
+        "nationality": None, "dob": None, "team": None,
+        "pcs_rank": None, "speciality": None,
+        "weight_kg": None, "height_cm": None,
+    }
+
+
 def _scrape_race_results(race_id: int, race_slug: str, skip_riders: bool) -> int:
     """Fetch and store results for all stages of one race. Returns total results inserted.
 
@@ -59,19 +68,9 @@ def _scrape_race_results(race_id: int, race_slug: str, skip_riders: bool) -> int
                 if slug not in riders_seen:
                     if not skip_riders:
                         rider = fetch_rider(slug)
-                        rider_id = upsert_rider(conn, rider if rider else {
-                            "pcs_slug": slug, "name": r["rider_name"],
-                            "nationality": None, "dob": None, "team": None,
-                            "pcs_rank": None, "speciality": None,
-                            "weight_kg": None, "height_cm": None,
-                        })
+                        rider_id = upsert_rider(conn, rider if rider else _stub_rider(slug, r["rider_name"]))
                     else:
-                        rider_id = upsert_rider(conn, {
-                            "pcs_slug": slug, "name": r["rider_name"],
-                            "nationality": None, "dob": None, "team": None,
-                            "pcs_rank": None, "speciality": None,
-                            "weight_kg": None, "height_cm": None,
-                        })
+                        rider_id = upsert_rider(conn, _stub_rider(slug, r["rider_name"]))
                     riders_seen[slug] = rider_id
 
                 insert_result(conn, {

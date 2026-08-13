@@ -1,6 +1,9 @@
 import sqlite3
 import pathlib
 from contextlib import contextmanager
+
+import pandas as pd
+
 from config import DB_PATH
 
 
@@ -160,4 +163,32 @@ def insert_result(conn: sqlite3.Connection, data: dict) -> None:
             points_uci   = excluded.points_uci
         """,
         data,
+    )
+
+
+# ── DB loaders (used by model/predict.py for start-list predictions) ──────────
+
+def _load_results(conn) -> pd.DataFrame:
+    return pd.read_sql(
+        "SELECT id, stage_id, rider_id, position, status, time_seconds FROM results", conn
+    )
+
+
+def _load_stages(conn) -> pd.DataFrame:
+    return pd.read_sql(
+        "SELECT id, race_id, stage_num, date, distance_km, elevation_m, profile_type, surface, gradient_final_km, profile_score FROM stages",
+        conn,
+    )
+
+
+def _load_races(conn) -> pd.DataFrame:
+    return pd.read_sql(
+        "SELECT id, pcs_slug, name, year, is_stage_race FROM races", conn
+    )
+
+
+def _load_riders(conn) -> pd.DataFrame:
+    return pd.read_sql(
+        "SELECT id, pcs_slug, name, team, pcs_rank, speciality, weight_kg, height_cm, dob FROM riders",
+        conn,
     )

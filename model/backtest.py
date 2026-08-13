@@ -58,7 +58,6 @@ def backtest(race_slug: str, cutoff_date: str, top_n: int = 10, gender: str = "m
         recall    = hits / max(len(actual_top10_riders), 1)
 
         stage_name = group["race_name"].iloc[0] if "race_name" in group.columns else "?"
-        stage_num  = group.sort_values("position").iloc[0].get("stage_id", "?")
 
         stage_metrics.append({
             "date":      stage_date,
@@ -73,9 +72,7 @@ def backtest(race_slug: str, cutoff_date: str, top_n: int = 10, gender: str = "m
               f"precision={precision:.2f}  recall={recall:.2f}  ({hits}/{top_n} correct)\n")
         print(f"  {'Rank':>4}  {'Rider':<28}  {'P(top10)':>8}  {'Actual pos':>10}  {'✓':>3}")
         print(f"  {'-'*60}")
-        for rank, (_, row) in enumerate(
-            group.sort_values("top10_prob", ascending=False).head(top_n).iterrows(), 1
-        ):
+        for rank, (_, row) in enumerate(group.head(top_n).iterrows(), 1):
             actual_pos = int(row["position"]) if pd.notna(row["position"]) else "DNF"
             correct    = "✓" if row.get("top10") == 1 else " "
             name       = (row.get("rider_name") or "Unknown")[:27]
@@ -142,5 +139,6 @@ if __name__ == "__main__":
     parser.add_argument("--cutoff",  default="2024-05-04",
                         help="Race start date — no data after this used for features")
     parser.add_argument("--top-n",   type=int, default=10)
+    parser.add_argument("--gender",  default="men", choices=["men", "women"])
     args = parser.parse_args()
-    backtest(args.race, args.cutoff, args.top_n)
+    backtest(args.race, args.cutoff, args.top_n, args.gender)

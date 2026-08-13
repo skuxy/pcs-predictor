@@ -10,16 +10,17 @@ DB_PATH = "data/cycling.db"
 # Data range
 SCRAPE_YEARS = [2023, 2024]  # years of results to collect
 
-# Race tiers to include (PCS classification codes)
-# 2.UWT = UCI WorldTour, 2.HC = Hors Categorie, 2.1 = first division
-RACE_CLASSES = ["2.UWT", "2.HC", "2.1", "1.UWT", "1.HC", "1.Pro", "2.Pro"]
-
 # PCS circuit numbers + allowed classes per circuit for men's races.
 # circuit 1  = UCI WorldTour (1.UWT, 2.UWT)
 # circuit 13 = lower-tier European calendar (1.1, 2.1) — Étoile de Bessèges, GP Monseré, Samyn, etc.
 # circuit 16 = miscellaneous lower-tier (2.1, some 2.Pro) — also contains women's races; class filter handles them
 # circuit 26 = UCI ProSeries (1.Pro, 2.Pro) — Kuurne, Clasica de Almeria, Ruta del Sol, etc.
-MEN_CIRCUITS = {"1": RACE_CLASSES, "13": ["1.1", "2.1"], "16": ["2.1", "2.Pro"], "26": ["1.Pro", "2.Pro"]}
+MEN_CIRCUITS = {
+    "1":  ["2.UWT", "2.HC", "2.1", "1.UWT", "1.HC", "1.Pro", "2.Pro"],
+    "13": ["1.1", "2.1"],
+    "16": ["2.1", "2.Pro"],
+    "26": ["1.Pro", "2.Pro"],
+}
 
 # Women's WorldTour class codes (circuit=24 on PCS)
 WOMEN_RACE_CLASSES = ["2.WWT", "1.WWT"]

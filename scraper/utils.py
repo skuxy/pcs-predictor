@@ -36,9 +36,13 @@ SESSION.headers.update(
 _last_request: float = 0.0
 
 
-def _cache_path(url: str) -> pathlib.Path:
+def cache_path(url: str) -> pathlib.Path:
     key = hashlib.md5(url.encode()).hexdigest()
     return pathlib.Path(CACHE_DIR) / f"{key}.html"
+
+
+# Keep underscore alias for any external callers during transition.
+_cache_path = cache_path
 
 
 def _is_cloudflare_challenge(html: str) -> bool:
@@ -47,7 +51,7 @@ def _is_cloudflare_challenge(html: str) -> bool:
            "Checking if the site connection is secure" in html
 
 
-def _fetch_with_playwright(url: str) -> Optional[str]:
+def fetch_with_playwright(url: str) -> Optional[str]:
     """Fetch a URL using a headless Chromium browser (bypasses Cloudflare challenges)."""
     try:
         from playwright.sync_api import sync_playwright
@@ -98,6 +102,10 @@ def _fetch_with_playwright(url: str) -> Optional[str]:
         return None
 
 
+# Keep underscore alias for any external callers during transition.
+_fetch_with_playwright = fetch_with_playwright
+
+
 def fetch(url: str, use_cache: bool = True) -> Optional[str]:
     """Fetch a URL, respecting rate limits and using an HTML cache.
 
@@ -106,7 +114,7 @@ def fetch(url: str, use_cache: bool = True) -> Optional[str]:
     """
     global _last_request
 
-    cache_file = _cache_path(url)
+    cache_file = cache_path(url)
     if use_cache and cache_file.exists():
         if _is_live_url(url):
             age = time.time() - cache_file.stat().st_mtime
@@ -131,7 +139,7 @@ def fetch(url: str, use_cache: bool = True) -> Optional[str]:
             resp = SESSION.get(url, timeout=REQUEST_TIMEOUT)
             if resp.status_code == 403 or _is_cloudflare_challenge(resp.text):
                 log.info("Cloudflare challenge detected for %s — switching to playwright", url)
-                html = _fetch_with_playwright(url)
+                html = fetch_with_playwright(url)
                 break
             resp.raise_for_status()
             html = resp.text

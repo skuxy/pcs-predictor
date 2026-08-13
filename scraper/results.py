@@ -2,17 +2,17 @@
 import logging
 import re
 
-from scraper.utils import fetch, soup, pcs_url, parse_time_gap, _fetch_with_playwright, _cache_path
+from scraper.utils import fetch, soup, pcs_url, parse_time_gap, fetch_with_playwright, cache_path
 
 log = logging.getLogger(__name__)
 
 
 def _try_playwright(url: str):
     """Fetch url via Playwright, overwriting the stale cache entry. Returns soup or None."""
-    pw_html = _fetch_with_playwright(url)
+    pw_html = fetch_with_playwright(url)
     if not pw_html:
         return None
-    _cache_path(url).write_text(pw_html, encoding="utf-8")
+    cache_path(url).write_text(pw_html, encoding="utf-8")
     return soup(pw_html)
 
 
