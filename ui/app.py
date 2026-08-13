@@ -264,7 +264,9 @@ with tab_hist:
 
     if "bt_df" in st.session_state and st.session_state.get("bt_slug") == bt_slug:
         bt_df = st.session_state["bt_df"]
-        known = bt_df.dropna(subset=["top10", "position"])
+        known = bt_df.dropna(subset=["top10", "position"]).copy()
+        # Normalise to plain YYYY-MM-DD strings so comparisons are type-safe
+        known["stage_date_str"] = known["stage_date"].apply(lambda d: str(d)[:10])
 
         if known.empty:
             st.warning("No results found — this race may not have results in the database yet.")
@@ -276,16 +278,16 @@ with tab_hist:
             else:
                 auc = ap = float("nan")
 
-            stage_p10s = [
-                precision_at_n(g, 10)
-                for _, g in known.groupby("stage_date")
-            ]
-            avg_p10 = float(np.mean(stage_p10s))
+            p10_by_date = {
+                str(d)[:10]: precision_at_n(g, 10)
+                for d, g in known.groupby("stage_date")
+            }
+            avg_p10 = float(np.mean(list(p10_by_date.values())))
 
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("AUC", f"{auc:.3f}")
             m2.metric("Avg precision@10", f"{avg_p10:.3f}")
-            m3.metric("Stages evaluated", len(stage_p10s))
+            m3.metric("Stages evaluated", len(p10_by_date))
             m4.metric("Avg AP", f"{ap:.3f}")
 
             st.divider()
@@ -316,12 +318,13 @@ with tab_hist:
 
             with col_stages:
                 st.markdown("**Per-stage results**")
+                stage_dates = sorted(known["stage_date_str"].unique())
                 stage_sel = st.selectbox(
                     "Stage",
-                    [str(d)[:10] for d in sorted(known["stage_date"].unique())],
-                    key="stage_sel",
+                    stage_dates,
+                    key=f"stage_sel_{bt_slug}",
                 )
-                stage_group = known[known["stage_date"].astype(str).str[:10] == stage_sel]
+                stage_group = known[known["stage_date_str"] == stage_sel]
                 stage_group = stage_group.sort_values("top10_prob", ascending=False).head(top_n).reset_index(drop=True)
                 stage_group.index = range(1, len(stage_group) + 1)
 
@@ -330,10 +333,9 @@ with tab_hist:
                 disp["Top10?"] = disp["Top10?"].apply(lambda x: "✓" if x == 1 else "")
                 disp["Actual pos"] = disp["Actual pos"].apply(lambda x: int(x) if pd.notna(x) else "DNF")
 
-                p10 = stage_p10s[
-                    [str(d)[:10] for d in sorted(known["stage_date"].unique())].index(stage_sel)
-                ]
-                st.caption(f"Precision@10: {p10:.2f}  ({int(p10*10)}/10 correct)")
+                p10 = p10_by_date.get(stage_sel, float("nan"))
+                if not np.isnan(p10):
+                    st.caption(f"Precision@10: {p10:.2f}  ({int(p10*10)}/10 correct)")
 
                 st.dataframe(
                     disp.style.apply(

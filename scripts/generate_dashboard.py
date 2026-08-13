@@ -32,10 +32,42 @@ DAYS_AHEAD = 21
 OUTPUT_DIR = ROOT / "dashboard"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
+PCS_BASE = "https://www.procyclingstats.com"
+
 PROFILE_LABELS = {
-    "flat": "Flat 🏁", "hilly": "Hilly ⛰", "mountain": "Mountain 🏔",
-    "itt": "ITT 🕐", "ttt": "TTT",
+    "flat": "Flat", "hilly": "Hilly", "mountain": "Mountain",
+    "itt": "ITT", "ttt": "TTT",
 }
+
+PROFILE_COLORS = {
+    "mountain": "#c0392b",
+    "hilly":    "#e67e22",
+    "flat":     "#2980b9",
+    "itt":      "#8e44ad",
+    "ttt":      "#16a085",
+}
+
+# Inline SVG profile silhouettes (48×18 viewBox)
+_SVGS = {
+    "mountain": '<polygon points="0,18 18,4 24,10 30,2 48,18"/>',
+    "hilly":    '<polygon points="0,18 10,10 20,15 30,6 40,12 48,18"/>',
+    "flat":     '<polygon points="0,18 0,14 16,14 20,10 24,14 48,14 48,18"/>',
+    "itt":      '<g fill="none" stroke-width="2.5" stroke-linecap="round"><line x1="21" y1="3" x2="27" y2="3"/><circle cx="24" cy="12" r="7"/><line x1="24" y1="5" x2="24" y2="12"/><line x1="24" y1="12" x2="29" y2="12"/></g>',
+    "ttt":      '<g fill="none" stroke-width="2.5"><circle cx="12" cy="11" r="5"/><circle cx="24" cy="11" r="5"/><circle cx="36" cy="11" r="5"/></g>',
+}
+
+
+def _profile_svg(profile: str, active: bool = False) -> str:
+    col = "rgba(255,255,255,0.9)" if active else PROFILE_COLORS.get(profile, "#95a5a6")
+    body = _SVGS.get(profile, "")
+    return f'<svg viewBox="0 0 48 18" class="psvg" style="color:{col}" fill="{col}" stroke="{col}">{body}</svg>'
+
+
+def _country_flag(cc: str) -> str:
+    if not cc or len(cc) != 2:
+        return ""
+    return (chr(0x1F1E6 + ord(cc[0].upper()) - ord("A")) +
+            chr(0x1F1E6 + ord(cc[1].upper()) - ord("A")))
 
 
 # ── Data loaders ───────────────────────────────────────────────────────────────
@@ -44,12 +76,32 @@ def _upcoming_races():
     end = (TODAY + datetime.timedelta(days=DAYS_AHEAD)).isoformat()
     with get_conn() as conn:
         return conn.execute(
-            """SELECT pcs_slug, name, start_date, end_date, is_stage_race, gender
+            """SELECT id, pcs_slug, name, start_date, end_date,
+                      is_stage_race, gender, country, class
                FROM races
                WHERE start_date >= ? AND start_date <= ?
                ORDER BY start_date""",
             (TODAY_STR, end),
         ).fetchall()
+
+
+def _stage_info_for_race(race_id: int) -> dict:
+    """Returns {date_str: {pcs_slug, departure, arrival, distance_km, elevation_m, profile_type, surface}}"""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT pcs_slug, date, departure, arrival,
+                      distance_km, elevation_m, profile_type, surface
+               FROM stages WHERE race_id = ? ORDER BY date""",
+            (race_id,),
+        ).fetchall()
+    return {row["date"]: dict(row) for row in rows}
+
+
+def _rider_id_slug_map() -> dict:
+    """Returns {rider_id: pcs_slug} for all riders."""
+    with get_conn() as conn:
+        rows = conn.execute("SELECT id, pcs_slug FROM riders").fetchall()
+    return {row["id"]: row["pcs_slug"] for row in rows}
 
 
 def _recent_races(n: int = 10, gender: str = "men"):
@@ -96,7 +148,6 @@ def _prob_colour(p: float) -> str:
 
 
 def _prob_bar(p: float) -> str:
-    pct   = int(p * 100)
     width = max(int(p * 140), 2)
     col   = _prob_colour(p)
     return (
@@ -107,7 +158,9 @@ def _prob_bar(p: float) -> str:
     )
 
 
-def _stage_table(rows: list[dict], top_n: int = 20) -> str:
+def _stage_table(rows: list[dict], top_n: int = 20, rider_slugs: dict | None = None,
+                 stage_pcs_slug: str | None = None) -> str:
+    rider_slugs = rider_slugs or {}
     trs = ""
     for i, r in enumerate(rows[:top_n], 1):
         extra = ""
@@ -115,23 +168,44 @@ def _stage_table(rows: list[dict], top_n: int = 20) -> str:
             extra += f'<td class="aux">{r["win_prob"]:.3f}</td>'
         if "top3_prob" in r and r["top3_prob"] is not None:
             extra += f'<td class="aux">{r["top3_prob"]:.3f}</td>'
+
         medal = ("🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else str(i))
         cls   = "podium" if i <= 3 else ("hot" if i <= 10 else "")
+
+        rid  = r.get("rider_id")
+        slug = rider_slugs.get(rid) if rid and not (isinstance(rid, float) and np.isnan(rid)) else None
+        if slug:
+            name_html = (
+                f'<a href="{PCS_BASE}/rider/{slug}" target="_blank" '
+                f'class="rider-link" title="View on PCS">{r["rider_name"]}</a>'
+            )
+        else:
+            name_html = str(r["rider_name"])
+
         trs += (
             f'<tr class="{cls}">'
             f'<td class="rank">{medal}</td>'
-            f'<td class="name">{r["rider_name"]}</td>'
+            f'<td class="name">{name_html}</td>'
             f'<td>{_prob_bar(r["top10_prob"])}</td>'
             f'{extra}'
             f'</tr>'
         )
-    # optional extra headers
+
     has_win  = any("win_prob"  in r and r["win_prob"]  is not None for r in rows[:1])
     has_top3 = any("top3_prob" in r and r["top3_prob"] is not None for r in rows[:1])
     extra_th = ""
     if has_win:  extra_th += '<th class="aux">P(win)</th>'
     if has_top3: extra_th += '<th class="aux">P(top3)</th>'
+
+    stage_link = ""
+    if stage_pcs_slug:
+        stage_link = (
+            f'<a href="{PCS_BASE}/{stage_pcs_slug}" target="_blank" '
+            f'class="stage-ext-link">View stage on PCS ↗</a>'
+        )
+
     return (
+        f'<div class="panel-hd">{stage_link}</div>'
         f'<table>'
         f'<thead><tr><th class="rank">#</th><th>Rider</th>'
         f'<th>P(top10)</th>{extra_th}</tr></thead>'
@@ -140,32 +214,112 @@ def _stage_table(rows: list[dict], top_n: int = 20) -> str:
     )
 
 
-def _race_card(race, preds: pd.DataFrame, idx: int) -> str:
+def _stage_btn(rid: str, idx: int, date_str: str, stage_meta: dict | None, is_first: bool) -> str:
+    profile  = (stage_meta or {}).get("profile_type", "")
+    surface  = (stage_meta or {}).get("surface", "road")
+    dist     = (stage_meta or {}).get("distance_km")
+    elev     = (stage_meta or {}).get("elevation_m")
+    dep      = (stage_meta or {}).get("departure") or ""
+    arr      = (stage_meta or {}).get("arrival") or ""
+    slug     = (stage_meta or {}).get("pcs_slug", "")
+
+    label    = PROFILE_LABELS.get(profile, profile.title() if profile else "Stage")
+    if surface in ("cobbled", "gravel"):
+        label += f" ({surface})"
+
+    col = PROFILE_COLORS.get(profile, "#95a5a6")
+    active_cls = " active" if is_first else ""
+
+    # Stats line
+    stats_parts = []
+    if dist:  stats_parts.append(f"{dist:.0f}km")
+    if elev:  stats_parts.append(f"{elev:,}m↑")
+    stats_str = " · ".join(stats_parts)
+
+    # Route line (truncate city names)
+    def _short(city: str, n: int = 14) -> str:
+        return city[:n] + "…" if len(city) > n else city
+    route_str = f"{_short(dep)} → {_short(arr)}" if dep and arr else (dep or arr or "")
+
+    # Date formatted compactly
+    try:
+        dt = datetime.date.fromisoformat(date_str)
+        date_fmt = dt.strftime("%b %-d")
+    except ValueError:
+        date_fmt = date_str[:10]
+
+    psvg = _profile_svg(profile, active=is_first)
+
+    btn_inner = (
+        f'<span class="stbtn-date">{date_fmt}</span>'
+        f'{psvg}'
+        f'<span class="stbtn-label">{label}</span>'
+    )
+    if stats_str:
+        btn_inner += f'<span class="stbtn-stats">{stats_str}</span>'
+    if route_str:
+        btn_inner += f'<span class="stbtn-route">{route_str}</span>'
+
+    return (
+        f'<button class="stbtn{active_cls}" onclick="sw(\'{rid}\',{idx})" '
+        f'style="--pc:{col}">'
+        f'{btn_inner}'
+        f'</button>'
+    )
+
+
+def _race_info_strip(race) -> str:
+    flag  = _country_flag(race["country"] or "")
+    cc    = race["country"] or ""
+    cls   = race["class"] or ""
+    slug  = race["pcs_slug"] or ""
+    pcs_url = f"{PCS_BASE}/{slug}"
+
+    parts = []
+    if cc:
+        parts.append(f'<span class="meta-item">{flag} {cc}</span>')
+    if cls:
+        parts.append(f'<span class="meta-item badge class-badge">{cls}</span>')
+    parts.append(
+        f'<a href="{pcs_url}" target="_blank" class="meta-link">View on PCS ↗</a>'
+    )
+
+    return f'<div class="race-meta">{"".join(parts)}</div>'
+
+
+def _race_card(race, preds: pd.DataFrame, idx: int,
+               stage_info: dict, rider_slugs: dict) -> str:
     rid    = f"rc{idx}"
     gender = race["gender"] or "men"
     gbadge = f'<span class="badge g-{gender}">{gender}</span>'
 
     stages = []
     for sd, grp in preds.groupby("stage_date"):
-        profile = grp["profile_type"].iloc[0] if "profile_type" in grp.columns else ""
-        label   = PROFILE_LABELS.get(profile, profile or "Stage")
-        rows    = grp.sort_values("top10_prob", ascending=False).to_dict("records")
-        stages.append((str(sd)[:10], label, rows))
+        date_str = str(sd)[:10]
+        meta     = stage_info.get(date_str) or {}
+        profile  = grp["profile_type"].iloc[0] if "profile_type" in grp.columns else ""
+        if not meta.get("profile_type") and profile:
+            meta = dict(meta, profile_type=profile)
+        rows = grp.sort_values("top10_prob", ascending=False).to_dict("records")
+        stages.append((date_str, meta, rows))
 
     if not stages:
         return ""
 
     btns = "".join(
-        f'<button class="stbtn{"  active" if i == 0 else ""}" '
-        f'onclick="sw(\'{rid}\',{i})">{d}<br><small>{p}</small></button>'
-        for i, (d, p, _) in enumerate(stages)
+        _stage_btn(rid, i, d, meta, i == 0)
+        for i, (d, meta, _) in enumerate(stages)
     )
     panels = "".join(
-        f'<div class="stpanel{"  active" if i == 0 else ""}">{_stage_table(rows)}</div>'
-        for i, (_, _, rows) in enumerate(stages)
+        f'<div class="stpanel{"  active" if i == 0 else ""}">'
+        f'{_stage_table(rows, rider_slugs=rider_slugs, stage_pcs_slug=(meta or {}).get("pcs_slug"))}'
+        f'</div>'
+        for i, (_, meta, rows) in enumerate(stages)
     )
 
     race_type = "Stage race" if race["is_stage_race"] else "One-day"
+    info_strip = _race_info_strip(race)
+
     return f"""
 <div class="card" id="{rid}">
   <div class="card-hd">
@@ -176,6 +330,7 @@ def _race_card(race, preds: pd.DataFrame, idx: int) -> str:
     </div>
     <span class="dates">{race["start_date"]} → {race["end_date"]}</span>
   </div>
+  {info_strip}
   <div class="stbar">{btns}</div>
   <div class="panels">{panels}</div>
 </div>"""
@@ -211,7 +366,7 @@ def _accuracy_section(metrics_m: dict, metrics_w: dict, recent_m, recent_w, stat
     fi_html = ""
     fi = metrics_m.get("feature_importances", {})
     if fi:
-        max_v  = max(fi.values())
+        max_v   = max(fi.values())
         fi_rows = "".join(
             f'<div class="firow">'
             f'<span class="finame">{name}</span>'
@@ -226,7 +381,8 @@ def _accuracy_section(metrics_m: dict, metrics_w: dict, recent_m, recent_w, stat
         if not rows:
             return f'<p class="muted">No completed {title} races found.</p>'
         trs = "".join(
-            f'<tr><td>{r["name"]}</td><td>{r["end_date"]}</td>'
+            f'<tr><td><a href="{PCS_BASE}/{r["pcs_slug"]}" target="_blank" class="rider-link">'
+            f'{r["name"]}</a></td><td>{r["end_date"]}</td>'
             f'<td class="num">{r["stages"]}</td><td class="num">{r["results"]:,}</td></tr>'
             for r in rows
         )
@@ -277,16 +433,34 @@ section.active{display:block}
 .g-women{background:#e91e6333;color:#f48fb1}
 .type-badge{background:#ffffff22;color:#ffffff99}
 
-.stbar{display:flex;flex-wrap:wrap;gap:3px;padding:10px 14px;border-bottom:1px solid var(--border);background:#fafbfc}
-.stbtn{background:#fff;border:1px solid var(--border);border-radius:5px;cursor:pointer;padding:5px 12px;font-size:.78rem;color:var(--muted);text-align:center;line-height:1.3;transition:all .15s}
-.stbtn small{display:block;font-size:.7rem;color:var(--muted)}
-.stbtn.active{background:var(--accent);color:#fff;border-color:var(--accent);font-weight:600}
-.stbtn.active small{color:#ffd3cc}
-.stbtn:hover:not(.active){border-color:var(--accent);color:var(--accent)}
+/* Race meta strip */
+.race-meta{display:flex;align-items:center;gap:10px;padding:7px 18px;background:#f7f9fc;border-bottom:1px solid var(--border);font-size:.8rem;flex-wrap:wrap}
+.meta-item{color:var(--text);opacity:.8}
+.meta-sep{color:var(--muted)}
+.meta-link{color:var(--accent);text-decoration:none;font-weight:500;margin-left:auto}
+.meta-link:hover{text-decoration:underline}
+.class-badge{background:#e8f0fe;color:#1967d2;padding:2px 6px;border-radius:8px;font-size:.72rem}
+
+/* Stage tab bar */
+.stbar{display:flex;flex-wrap:nowrap;gap:4px;padding:10px 14px;border-bottom:1px solid var(--border);background:#fafbfc;overflow-x:auto;scrollbar-width:thin}
+.stbtn{background:#fff;border:1px solid var(--border);border-radius:6px;cursor:pointer;padding:6px 10px;font-size:.76rem;color:var(--muted);text-align:center;line-height:1.3;transition:all .15s;min-width:90px;max-width:130px;display:flex;flex-direction:column;align-items:center;gap:2px;border-top:3px solid var(--pc,#bdc3c7);flex-shrink:0}
+.stbtn.active{background:var(--pc,var(--accent));color:#fff;border-color:var(--pc,var(--accent));font-weight:600;border-top-color:transparent}
+.stbtn:hover:not(.active){border-color:var(--pc,var(--accent));color:var(--pc,var(--accent))}
+.stbtn-date{font-weight:600;font-size:.8rem}
+.stbtn-label{font-size:.7rem;opacity:.85}
+.stbtn-stats{font-size:.68rem;opacity:.75}
+.stbtn-route{font-size:.66rem;opacity:.7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px}
+.psvg{display:block;width:48px;height:18px;margin:2px auto}
+.stbtn.active .psvg{filter:brightness(10)}
 
 .panels{padding:0}
 .stpanel{display:none;padding:14px 18px}
 .stpanel.active{display:block}
+
+/* Stage panel header */
+.panel-hd{display:flex;justify-content:flex-end;margin-bottom:8px;min-height:18px}
+.stage-ext-link{font-size:.76rem;color:var(--accent);text-decoration:none;font-weight:500}
+.stage-ext-link:hover{text-decoration:underline}
 
 table{width:100%;border-collapse:collapse;font-size:.84rem}
 th{text-align:left;padding:7px 10px;color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;border-bottom:2px solid var(--border)}
@@ -296,6 +470,8 @@ tr:last-child td{border-bottom:none}
 tr:hover td{background:#fafafa}
 .rank{color:var(--muted);text-align:right;width:32px;font-size:.8rem}
 .name{font-weight:500}
+.rider-link{color:inherit;text-decoration:none}
+.rider-link:hover{color:var(--accent);text-decoration:underline}
 .aux{color:var(--muted);font-size:.8rem;text-align:right;width:70px}
 .podium td{background:#fffdf0}
 .podium .name{font-weight:700}
@@ -327,7 +503,7 @@ footer{text-align:center;color:var(--muted);padding:20px;font-size:.78rem;border
 @media(max-width:640px){
   header,main,nav{padding-left:14px;padding-right:14px}
   .mboxes{grid-template-columns:repeat(2,1fr)}
-  .stbtn{padding:4px 8px;font-size:.72rem}
+  .stbtn{min-width:80px;padding:5px 7px}
 }
 """
 
@@ -352,6 +528,7 @@ document.addEventListener('DOMContentLoaded', function(){ nav('races'); });
 def generate():
     print(f"[{TODAY_STR}] Generating dashboard …")
     upcoming   = _upcoming_races()
+    rider_slugs = _rider_id_slug_map()
     metrics_m  = _model_metrics("men")
     metrics_w  = _model_metrics("women")
     recent_m   = _recent_races(10, "men")
@@ -359,18 +536,20 @@ def generate():
     stats      = _db_stats()
 
     print(f"  {len(upcoming)} upcoming race(s) within {DAYS_AHEAD} days")
+    print(f"  {len(rider_slugs)} riders in slug map")
 
     cards_html = ""
     for i, race in enumerate(upcoming):
-        slug   = race["pcs_slug"]
-        gender = race["gender"] or "men"
+        slug       = race["pcs_slug"]
+        gender     = race["gender"] or "men"
+        stage_info = _stage_info_for_race(race["id"])
         print(f"  Predicting {race['name']} ({gender}) …", end="", flush=True)
         try:
             preds = predict_race(slug, TODAY_STR, gender=gender)
             if preds.empty:
                 print(" no predictions")
                 continue
-            card = _race_card(race, preds, i)
+            card = _race_card(race, preds, i, stage_info, rider_slugs)
             if card:
                 cards_html += card
                 n_stages = preds["stage_date"].nunique()
@@ -390,7 +569,7 @@ def generate():
             '</div>'
         )
 
-    acc_html  = _accuracy_section(metrics_m, metrics_w, recent_m, recent_w, stats)
+    acc_html = _accuracy_section(metrics_m, metrics_w, recent_m, recent_w, stats)
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -416,7 +595,7 @@ def generate():
   <section id="s-races">{cards_html}</section>
   <section id="s-accuracy">{acc_html}</section>
 </main>
-<footer>PCS Predictor · Data from ProCyclingStats · {TODAY_STR}</footer>
+<footer>PCS Predictor · Data from <a href="{PCS_BASE}" target="_blank" style="color:inherit">ProCyclingStats</a> · {TODAY_STR}</footer>
 <script>{JS}</script>
 </body>
 </html>"""
