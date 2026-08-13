@@ -11,6 +11,12 @@ from config import PCS_BASE, REQUEST_DELAY, REQUEST_TIMEOUT, MAX_RETRIES, CACHE_
 
 log = logging.getLogger(__name__)
 
+LIVE_CACHE_TTL = 6 * 3600
+
+
+def _is_live_url(url: str) -> bool:
+    return "/startlist" in url
+
 SESSION = requests.Session()
 SESSION.headers.update(
     {
@@ -102,8 +108,16 @@ def fetch(url: str, use_cache: bool = True) -> Optional[str]:
 
     cache_file = _cache_path(url)
     if use_cache and cache_file.exists():
-        log.debug("cache hit: %s", url)
-        return cache_file.read_text(encoding="utf-8")
+        if _is_live_url(url):
+            age = time.time() - cache_file.stat().st_mtime
+            if age <= LIVE_CACHE_TTL:
+                log.debug("cache hit: %s", url)
+                return cache_file.read_text(encoding="utf-8")
+            cache_file.unlink()
+            log.debug("cache expired (startlist): %s", url)
+        else:
+            log.debug("cache hit: %s", url)
+            return cache_file.read_text(encoding="utf-8")
 
     # Rate limit
     elapsed = time.time() - _last_request

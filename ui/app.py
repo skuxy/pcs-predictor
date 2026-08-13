@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT))
 
 from db.database import get_conn
 from model.predict import predict_race
+from model.train import model_paths
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -65,7 +66,9 @@ with st.sidebar:
     top_n  = st.slider("Top N riders shown", 5, 30, 15)
 
 # ── tabs ──────────────────────────────────────────────────────────────────────
-tab_pred, tab_hist, tab_model = st.tabs(["🔮 Predictions", "📊 Historical Backtest", "🧠 Model"])
+tab_pred, tab_hist, tab_model, tab_clv = st.tabs(
+    ["🔮 Predictions", "📊 Historical Backtest", "🧠 Model", "💰 Bet Tracker"]
+)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 1 — PREDICTIONS
@@ -124,17 +127,105 @@ with tab_pred:
 
                     st.markdown(f"**{str(stage_date)[:10]}** — {profile}{surface}")
 
-                    display = group.head(top_n)[["rider_name", "top10_prob"]].copy()
+                    # Compute fair odds via normalised probabilities
+                    stage_p_sum = group["top10_prob"].sum()
+                    n_starters = max(len(group), 1)
+                    group = group.copy()
+                    group["p_norm"] = (group["top10_prob"] * 10 / stage_p_sum).clip(upper=1.0)
+                    group["fair_odds"] = (1.0 / group["p_norm"].replace(0, np.nan)).round(2)
+
+                    # Build display columns
+                    display_cols = ["rider_name", "top10_prob"]
+                    if "p_win" in group.columns:
+                        display_cols.append("p_win")
+                    if "p_top3" in group.columns:
+                        display_cols.append("p_top3")
+                    display_cols += ["fair_odds"]
+
+                    display = group.head(top_n)[display_cols].copy()
                     display.index = range(1, len(display) + 1)
-                    display.columns = ["Rider", "P(top10)"]
+
+                    rename_map = {
+                        "rider_name": "Rider",
+                        "top10_prob": "P(top10)",
+                        "p_win": "P(win)",
+                        "p_top3": "P(top3)",
+                        "fair_odds": "Fair odds",
+                    }
+                    display = display.rename(columns={k: v for k, v in rename_map.items() if k in display.columns})
+
+                    fmt = {"P(top10)": "{:.3f}", "Fair odds": "{:.2f}"}
+                    if "P(win)" in display.columns:
+                        fmt["P(win)"] = "{:.3f}"
+                    if "P(top3)" in display.columns:
+                        fmt["P(top3)"] = "{:.3f}"
 
                     # Colour by probability
                     st.dataframe(
                         display.style.background_gradient(
                             subset=["P(top10)"], cmap="YlGn", vmin=0, vmax=1
-                        ).format({"P(top10)": "{:.3f}"}),
+                        ).format(fmt),
                         use_container_width=True,
                     )
+
+                    # CSV export button
+                    csv_data = display.to_csv(index=False)
+                    st.download_button(
+                        "📥 CSV",
+                        csv_data,
+                        f"preds_{str(stage_date)[:10]}.csv",
+                        "text/csv",
+                        key=f"dl_{stage_date}",
+                    )
+
+                    # EV calculator expander
+                    with st.expander("💰 EV calculator"):
+                        st.caption("Paste odds as 'Rider Name: odds' lines (e.g. 'Pogacar: 4.50'). One per line.")
+                        odds_text = st.text_area("Bookmaker odds", key=f"ev_{stage_date}", height=120)
+                        if odds_text.strip():
+                            book_odds = {}
+                            for line in odds_text.strip().splitlines():
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                parts = line.rsplit(None, 1)
+                                if len(parts) == 2:
+                                    try:
+                                        name = parts[0].rstrip(":").strip()
+                                        book_odds[name] = float(parts[1])
+                                    except ValueError:
+                                        pass
+                            ev_rows = []
+                            for _, row in group.iterrows():
+                                odds = book_odds.get(row["rider_name"])
+                                if odds and row["p_norm"] > 0:
+                                    ev = row["p_norm"] * odds - 1
+                                    ev_rows.append({
+                                        "Rider": row["rider_name"],
+                                        "P(top10)": row["top10_prob"],
+                                        "Fair odds": row["fair_odds"],
+                                        "Book odds": odds,
+                                        "EV %": round(ev * 100, 1),
+                                    })
+                            if ev_rows:
+                                ev_df = pd.DataFrame(ev_rows).sort_values("EV %", ascending=False)
+
+                                def _color_ev(v):
+                                    if isinstance(v, (int, float)):
+                                        return "color: #1a8c4e; font-weight: bold" if v > 0 else "color: #c0392b"
+                                    return ""
+
+                                st.dataframe(
+                                    ev_df.style.applymap(_color_ev, subset=["EV %"])
+                                    .format({
+                                        "P(top10)": "{:.3f}",
+                                        "Fair odds": "{:.2f}",
+                                        "Book odds": "{:.2f}",
+                                        "EV %": "{:+.1f}%",
+                                    }),
+                                    use_container_width=True,
+                                )
+
                     st.divider()
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -258,8 +349,10 @@ with tab_hist:
 with tab_model:
     st.subheader("Model Performance")
 
-    metrics_path = ROOT / "model" / "metrics.json"
-    features_path = ROOT / "model" / "feature_names.json"
+    _, features_path, metrics_path = model_paths(gender)
+    # model_paths returns relative paths; resolve from project root
+    metrics_path  = ROOT / metrics_path
+    features_path = ROOT / features_path
 
     if metrics_path.exists():
         metrics = json.loads(metrics_path.read_text())
@@ -267,17 +360,21 @@ with tab_model:
         c1.metric("Validation AUC", f"{metrics.get('val_auc', 0):.4f}")
         c2.metric("Validation AP", f"{metrics.get('val_ap', 0):.4f}")
         c3.metric("Val rows", f"{metrics.get('val_rows', 0):,}")
+    else:
+        st.info(f"No metrics file found at `{metrics_path}`. Train the model first.")
 
     st.divider()
 
-    # Accuracy by terrain (2025 test data)
-    st.markdown("**Accuracy by terrain — 2025 test set**")
-    terrain_data = pd.DataFrame({
-        "Terrain":    ["Mountain", "Flat", "Hilly"],
-        "AUC":        [0.928,      0.897,  0.833],
-        "Avg p@10":   [0.565,      0.454,  0.339],
-    })
-    st.dataframe(terrain_data.set_index("Terrain"), use_container_width=False)
+    # Live feature importance (replaces static terrain table)
+    if metrics_path.exists():
+        if "feature_importances" in metrics:
+            fi = metrics["feature_importances"]
+            fi_df = pd.DataFrame(list(fi.items()), columns=["Feature", "Importance"])
+            fi_df = fi_df.sort_values("Importance", ascending=False).head(20)
+            st.markdown("**Top 20 features by importance**")
+            st.bar_chart(fi_df.set_index("Feature"))
+        else:
+            st.info("Retrain the model to generate feature importances.")
 
     st.divider()
 
@@ -305,3 +402,129 @@ with tab_model:
         for table in ["races", "stages", "results", "riders"]:
             count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             st.markdown(f"- **{table}**: {count:,} rows")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 4 — BET TRACKER
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_clv:
+    st.subheader("💰 Bet Tracker")
+    st.caption("Track your bets and measure ROI over time. Run 'python main.py init' once to create the bets table.")
+
+    # Load bets (handle missing table gracefully)
+    try:
+        with get_conn() as conn:
+            bets_df = pd.read_sql("SELECT * FROM bets ORDER BY created_at DESC", conn)
+    except Exception:
+        bets_df = pd.DataFrame()
+
+    if not bets_df.empty:
+        settled = bets_df[bets_df["result"].notna()]
+        pending = bets_df[bets_df["result"].isna()]
+
+        total_pnl   = float(settled["pnl"].sum()) if not settled.empty else 0.0
+        total_staked = float(settled["stake"].sum()) if not settled.empty else 0.0
+        roi         = (total_pnl / total_staked * 100) if total_staked > 0 else 0.0
+        avg_odds    = float(settled["odds_decimal"].mean()) if not settled.empty else 0.0
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("P&L", f"{total_pnl:+.2f}u")
+        m2.metric("ROI", f"{roi:+.1f}%")
+        m3.metric("Bets", f"{len(settled)} settled · {len(pending)} pending")
+        m4.metric("Avg odds", f"{avg_odds:.2f}" if avg_odds else "—")
+
+        if not pending.empty:
+            if st.button("🔄 Settle pending bets (look up results)"):
+                with get_conn() as conn:
+                    for _, bet in pending.iterrows():
+                        if not bet["stage_id"] or not bet["rider_id"]:
+                            continue
+                        row = conn.execute(
+                            "SELECT position FROM results WHERE stage_id=? AND rider_id=?",
+                            (int(bet["stage_id"]), int(bet["rider_id"]))
+                        ).fetchone()
+                        if row and row["position"] is not None:
+                            won = 1 if row["position"] <= 10 else 0
+                            pnl = float(bet["stake"]) * (float(bet["odds_decimal"]) - 1) if won else -float(bet["stake"])
+                            conn.execute(
+                                "UPDATE bets SET result=?, pnl=? WHERE id=?",
+                                (won, pnl, int(bet["id"]))
+                            )
+                st.rerun()
+
+        disp_cols = ["rider_name", "stage_date", "race_slug", "top10_prob",
+                     "odds_decimal", "stake", "result", "pnl", "created_at"]
+        disp_cols = [c for c in disp_cols if c in bets_df.columns]
+        disp = bets_df[disp_cols].rename(columns={
+            "rider_name": "Rider", "stage_date": "Stage", "race_slug": "Race",
+            "top10_prob": "P(top10)", "odds_decimal": "Odds",
+            "stake": "Stake", "result": "Result", "pnl": "P&L", "created_at": "Logged",
+        })
+        disp["Result"] = disp["Result"].apply(
+            lambda x: "✓ Won" if x == 1 else ("✗ Lost" if x == 0 else "⏳")
+        )
+        st.dataframe(
+            disp.style.format({
+                "P(top10)": lambda x: f"{x:.3f}" if isinstance(x, float) else "—",
+                "Odds": "{:.2f}",
+                "Stake": "{:.1f}",
+                "P&L": lambda x: f"{x:+.2f}" if isinstance(x, float) else "—",
+            }),
+            use_container_width=True,
+            height=400,
+        )
+
+        # Calibration: compare predicted top10_prob vs actual win rate
+        if not settled.empty and "top10_prob" in settled.columns:
+            st.markdown("**Calibration check**")
+            settled2 = settled[settled["top10_prob"].notna()].copy()
+            if not settled2.empty:
+                settled2["prob_bucket"] = pd.cut(settled2["top10_prob"], bins=5)
+                cal = settled2.groupby("prob_bucket").agg(
+                    predicted=("top10_prob", "mean"),
+                    actual=("result", "mean"),
+                    count=("result", "count"),
+                ).reset_index()
+                st.dataframe(
+                    cal.style.format({"predicted": "{:.3f}", "actual": "{:.3f}"}),
+                    use_container_width=False,
+                )
+    else:
+        st.info("No bets logged yet.")
+
+    st.divider()
+    with st.expander("➕ Log a new bet"):
+        with st.form("log_bet_form"):
+            c1, c2 = st.columns(2)
+            with c1:
+                b_race       = st.text_input("Race slug", placeholder="race/tour-de-france/2026")
+                b_rider      = st.text_input("Rider name", placeholder="Tadej Pogacar")
+                b_stage_date = st.date_input("Stage date", value=date.today())
+            with c2:
+                b_odds  = st.number_input("Decimal odds", min_value=1.01, value=5.0, format="%.2f")
+                b_stake = st.number_input("Stake (units)", min_value=0.1, value=1.0, format="%.1f")
+                b_prob  = st.number_input("P(top10)", min_value=0.0, max_value=1.0, value=0.0, format="%.3f")
+            submitted = st.form_submit_button("Log bet")
+            if submitted and b_rider and b_race:
+                try:
+                    with get_conn() as conn:
+                        stage_row = conn.execute(
+                            """SELECT s.id FROM stages s JOIN races r ON s.race_id=r.id
+                               WHERE r.pcs_slug=? AND s.date=?""",
+                            (b_race, str(b_stage_date))
+                        ).fetchone()
+                        rider_row = conn.execute(
+                            "SELECT id FROM riders WHERE LOWER(name)=LOWER(?)", (b_rider,)
+                        ).fetchone()
+                        stage_id = stage_row["id"] if stage_row else None
+                        rider_id = rider_row["id"] if rider_row else None
+                        conn.execute(
+                            """INSERT INTO bets (stage_id, rider_id, rider_name, stage_date,
+                               race_slug, top10_prob, odds_decimal, stake)
+                               VALUES (?,?,?,?,?,?,?,?)""",
+                            (stage_id, rider_id, b_rider, str(b_stage_date),
+                             b_race, b_prob if b_prob > 0 else None, b_odds, b_stake)
+                        )
+                    st.success(f"Bet logged: {b_rider} @ {b_odds:.2f}")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error logging bet: {e}")

@@ -112,6 +112,18 @@ def _parse_rider(s, slug: str) -> dict:
             if a:
                 data["team"] = a.get_text(strip=True)
 
+        elif "ranking" in label:
+            for v in values:
+                clean = re.sub(r"[^\d]", "", v)
+                if clean:
+                    try:
+                        rank = int(clean)
+                        if 0 < rank < 10000:
+                            data["pcs_rank"] = rank
+                            break
+                    except Exception:
+                        pass
+
     # Fallback team: first team/ link outside nav
     if not data["team"]:
         for a in s.select("a[href^='team/']"):

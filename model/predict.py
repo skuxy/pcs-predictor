@@ -13,6 +13,13 @@ from db.database import get_conn
 log = logging.getLogger(__name__)
 
 
+def _load_model(path: Path):
+    if path.exists():
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    return None
+
+
 def predict_race(race_slug: str, cutoff_date: str, gender: str = "men") -> pd.DataFrame:
     """
     Predict top-10 probabilities for all starters in a race.
@@ -27,18 +34,28 @@ def predict_race(race_slug: str, cutoff_date: str, gender: str = "men") -> pd.Da
         model = pickle.load(f)
     feature_cols = json.loads(meta_path.read_text())
 
+    win_path, _, _  = model_paths(gender, "win")
+    top3_path, _, _ = model_paths(gender, "top3")
+    win_model  = _load_model(win_path)
+    top3_model = _load_model(top3_path)
+
     log.info("building features for %s (gender=%s) …", race_slug, gender)
     df = build_features(cutoff_date=cutoff_date, race_slug=race_slug, gender=gender)
 
     if df.empty:
         log.warning("no features built — trying start list prediction")
-        df = predict_from_startlist(race_slug, cutoff_date, model, feature_cols, gender=gender)
+        df = predict_from_startlist(race_slug, cutoff_date, model, feature_cols, gender=gender,
+                                    win_model=win_model, top3_model=top3_model)
 
     if df.empty:
         return pd.DataFrame()
 
     X = df[feature_cols]
     df["top10_prob"] = model.predict_proba(X)[:, 1]
+    if win_model is not None:
+        df["win_prob"] = win_model.predict_proba(X)[:, 1]
+    if top3_model is not None:
+        df["top3_prob"] = top3_model.predict_proba(X)[:, 1]
     df["predicted_top10"] = (df["top10_prob"] >= 0.5).astype(int)
 
     return df.sort_values(["stage_date", "top10_prob"], ascending=[True, False])
@@ -50,6 +67,8 @@ def predict_from_startlist(
     model,
     feature_cols: list[str],
     gender: str = "men",
+    win_model=None,
+    top3_model=None,
 ) -> pd.DataFrame:
     """
     Build predictions for upcoming stages using the start list.
@@ -153,6 +172,27 @@ def predict_from_startlist(
         if len(cum):
             gc_deficit_now = ((cum - cum.min()) / 60.0).to_dict()
             gc_rank_now = cum.rank(method="min").to_dict()
+
+    # Build team GC context using bib-based team assignment from completed stage results
+    team_min_gc_deficit: dict = {}
+    team_best_gc_rank: dict = {}
+    rider_team_id: dict = {}
+    if comp_ids:
+        cur_bib = results_df[
+            results_df["stage_id"].isin(comp_ids) & results_df["bib"].notna()
+        ].drop_duplicates("rider_id")[["rider_id", "bib"]]
+        for _, row in cur_bib.iterrows():
+            rider_team_id[row["rider_id"]] = int(row["bib"]) // 10
+        for rid, deficit in gc_deficit_now.items():
+            tid = rider_team_id.get(rid)
+            if tid is not None:
+                if tid not in team_min_gc_deficit or deficit < team_min_gc_deficit[tid]:
+                    team_min_gc_deficit[tid] = deficit
+        for rid, rank in gc_rank_now.items():
+            tid = rider_team_id.get(rid)
+            if tid is not None:
+                if tid not in team_best_gc_rank or rank < team_best_gc_rank[tid]:
+                    team_best_gc_rank[tid] = rank
 
     race_stage_count = len(stages)
 
@@ -302,6 +342,11 @@ def predict_from_startlist(
                 _oneday365 = _od[_od["date"] >= stage_date - pd.Timedelta(days=365)]
                 _oneday90  = _od[_od["date"] >= stage_date - pd.Timedelta(days=90)]
 
+            _rider_team = rider_team_id.get(rider_id)
+            _t_deficit = team_min_gc_deficit.get(_rider_team, np.nan) if _rider_team is not None else np.nan
+            _t_rank    = team_best_gc_rank.get(_rider_team, np.nan) if _rider_team is not None else np.nan
+            _t_gc_out  = float(_t_deficit > 10) if not (isinstance(_t_deficit, float) and np.isnan(_t_deficit)) else np.nan
+
             row = {
                 "rider_id":   rider_id,
                 "stage_id":   stage["id"],
@@ -403,9 +448,9 @@ def predict_from_startlist(
                     float(gc_deficit_now.get(rider_id, np.nan) > 10)
                     if rider_id in gc_deficit_now else np.nan
                 ),
-                "team_min_gc_deficit": np.nan,
-                "team_best_gc_rank":   np.nan,
-                "team_gc_out_of_contention": np.nan,
+                "team_min_gc_deficit":       _t_deficit,
+                "team_best_gc_rank":         _t_rank,
+                "team_gc_out_of_contention": _t_gc_out,
             }
 
             surface = stage["surface"] if "surface" in stage.keys() else "road"
@@ -471,6 +516,10 @@ def predict_from_startlist(
     df["p_gc_x_mountain_form"]      = _pg * df["mountain_top10_rate_90d"].fillna(0)
 
     df["top10_prob"] = model.predict_proba(df[feature_cols])[:, 1]
+    if win_model is not None:
+        df["win_prob"] = win_model.predict_proba(df[feature_cols])[:, 1]
+    if top3_model is not None:
+        df["top3_prob"] = top3_model.predict_proba(df[feature_cols])[:, 1]
     df["predicted_top10"] = (df["top10_prob"] >= 0.5).astype(int)
     return df.sort_values(["stage_date", "top10_prob"], ascending=[True, False])
 

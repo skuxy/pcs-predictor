@@ -24,6 +24,30 @@ def init_db(db_path: str = DB_PATH) -> None:
             "UPDATE riders SET speciality='climber' WHERE speciality='puncher'"
         )
 
+        # Add performance indexes (idempotent)
+        for ddl in [
+            "CREATE INDEX IF NOT EXISTS idx_results_stage ON results(stage_id)",
+            "CREATE INDEX IF NOT EXISTS idx_results_rider ON results(rider_id)",
+            "CREATE INDEX IF NOT EXISTS idx_stages_race_date ON stages(race_id, date)",
+        ]:
+            conn.execute(ddl)
+
+        # Bet tracking table (added for CLV/ROI tracker)
+        conn.execute("""CREATE TABLE IF NOT EXISTS bets (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            stage_id      INTEGER REFERENCES stages(id),
+            rider_id      INTEGER REFERENCES riders(id),
+            rider_name    TEXT NOT NULL,
+            stage_date    TEXT,
+            race_slug     TEXT,
+            top10_prob    REAL,
+            odds_decimal  REAL NOT NULL,
+            stake         REAL DEFAULT 1.0,
+            result        INTEGER,
+            pnl           REAL,
+            created_at    TEXT DEFAULT (datetime('now'))
+        )""")
+
 
 @contextmanager
 def get_conn(db_path: str = DB_PATH):

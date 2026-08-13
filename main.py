@@ -120,7 +120,7 @@ def cmd_train(args):
     from model.stage_classifier import train as train_stage_clf
     from model.train import train
     train_stage_clf(cutoff_date=args.cutoff)
-    train(train_cutoff=args.cutoff, val_race_slug=args.val_race, gender=args.gender)
+    train(train_cutoff=args.cutoff, val_race_slug=args.val_race, gender=args.gender, target=getattr(args, 'target', 'top10'))
 
 
 def cmd_backtest(args):
@@ -391,6 +391,8 @@ def main():
                          help="Train on data before this date (default: Giro 2024 start)")
     p_train.add_argument("--val-race", default="race/giro-d-italia/2024")
     p_train.add_argument("--gender", default="men", choices=["men", "women"])
+    p_train.add_argument("--target", default="top10", choices=["top10", "top3", "win"],
+                         help="Prediction target: top10 (default), top3, or win")
     p_train.set_defaults(func=cmd_train)
 
     p_bt = sub.add_parser("backtest", help="Backtest against a historic race")

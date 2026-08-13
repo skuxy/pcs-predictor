@@ -113,3 +113,24 @@ CREATE TABLE IF NOT EXISTS predictions (
     created_at      TEXT DEFAULT (datetime('now')),
     UNIQUE(stage_id, rider_id, model_version)
 );
+
+-- Query performance indexes
+CREATE INDEX IF NOT EXISTS idx_results_stage ON results(stage_id);
+CREATE INDEX IF NOT EXISTS idx_results_rider ON results(rider_id);
+CREATE INDEX IF NOT EXISTS idx_stages_race_date ON stages(race_id, date);
+
+-- Bet tracking for CLV / ROI analysis
+CREATE TABLE IF NOT EXISTS bets (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage_id      INTEGER REFERENCES stages(id),
+    rider_id      INTEGER REFERENCES riders(id),
+    rider_name    TEXT NOT NULL,
+    stage_date    TEXT,
+    race_slug     TEXT,
+    top10_prob    REAL,
+    odds_decimal  REAL NOT NULL,
+    stake         REAL DEFAULT 1.0,
+    result        INTEGER,   -- 1 = won (top10), 0 = lost, NULL = pending
+    pnl           REAL,      -- profit/loss in stake units
+    created_at    TEXT DEFAULT (datetime('now'))
+);
