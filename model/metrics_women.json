@@ -1,1 +1,7 @@
-{}
+{
+  "train_cutoff": "2026-08-11",
+  "val_race": "race/giro-d-italia/2024",
+  "gender": "women",
+  "train_rows": 45688,
+  "n_features": 87
+}

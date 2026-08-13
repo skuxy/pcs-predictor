@@ -116,8 +116,10 @@ def cmd_scrape(args):
 
 
 def cmd_train(args):
-    """Train the top-10 probability model."""
+    """Train the stage outcome classifier then the top-10 probability model."""
+    from model.stage_classifier import train as train_stage_clf
     from model.train import train
+    train_stage_clf(cutoff_date=args.cutoff)
     train(train_cutoff=args.cutoff, val_race_slug=args.val_race, gender=args.gender)
 
 

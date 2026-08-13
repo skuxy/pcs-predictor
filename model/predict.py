@@ -135,7 +135,7 @@ def predict_from_startlist(
     results_df = results_df.merge(gc_hist, on=["stage_id", "rider_id"], how="left")
 
     results_df = results_df.merge(
-        stages_all[["id", "date", "profile_type", "surface"]].rename(columns={"id": "stage_id"}),
+        stages_all[["id", "date", "profile_type", "surface", "gradient_final_km", "is_stage_race"]].rename(columns={"id": "stage_id"}),
         on="stage_id",
     )
     results_df["date"] = pd.to_datetime(results_df["date"], errors="coerce")
@@ -285,6 +285,23 @@ def predict_from_startlist(
                     & (finished["profile_type"] != "ttt")
                 ]
 
+            # Punch-finish rolling (hilly stages with gradient >= 5)
+            _punch90 = pd.DataFrame()
+            if not finished.empty and "gradient_final_km" in finished.columns:
+                _punch90 = finished[
+                    (finished["profile_type"] == "hilly")
+                    & (finished["gradient_final_km"].fillna(0) >= 5.0)
+                    & (finished["date"] >= stage_date - pd.Timedelta(days=90))
+                ]
+
+            # One-day race rolling (non-stage-race history)
+            _oneday365 = pd.DataFrame()
+            _oneday90  = pd.DataFrame()
+            if not finished.empty and "is_stage_race" in finished.columns:
+                _od = finished[finished["is_stage_race"].fillna(0) == 0]
+                _oneday365 = _od[_od["date"] >= stage_date - pd.Timedelta(days=365)]
+                _oneday90  = _od[_od["date"] >= stage_date - pd.Timedelta(days=90)]
+
             row = {
                 "rider_id":   rider_id,
                 "stage_id":   stage["id"],
@@ -359,6 +376,36 @@ def predict_from_startlist(
                 "gc_rank_before": gc_rank_now.get(rider_id, np.nan),
                 "break_top10_rate_365d": _brk["is_top10"].mean() if len(_brk) else np.nan,
                 "break_top10s_365d":     float(_brk["is_top10"].sum()) if len(_brk) else 0.0,
+
+                # Punch-finish rolling
+                "punch_top10_rate_90d": _punch90["is_top10"].mean() if len(_punch90) else np.nan,
+                "punch_avg_pos_90d":    _punch90["position"].mean() if len(_punch90) else np.nan,
+
+                # One-day race rolling
+                "oneday_top10_rate_365d": _oneday365["is_top10"].mean() if len(_oneday365) else np.nan,
+                "oneday_avg_pos_90d":     _oneday90["position"].mean()  if len(_oneday90)  else np.nan,
+
+                # Stage-level derived features
+                "is_punch_finish": int(
+                    stage_profile_type == "hilly"
+                    and (stage["gradient_final_km"] or 0) >= 5.0
+                ),
+                "gradient_x_hilly": (stage["gradient_final_km"] or 0) * int(stage_profile_type == "hilly"),
+                "profile_score_per_gradient": (
+                    (stage["profile_score"] or 0) / ((stage["gradient_final_km"] or 0) + 1.0)
+                ),
+                "is_transition_stage": int(
+                    prev_pt == "mountain" and stage_profile_type in ("hilly", "flat")
+                ),
+
+                # GC context
+                "gc_out_of_contention": (
+                    float(gc_deficit_now.get(rider_id, np.nan) > 10)
+                    if rider_id in gc_deficit_now else np.nan
+                ),
+                "team_min_gc_deficit": np.nan,
+                "team_best_gc_rank":   np.nan,
+                "team_gc_out_of_contention": np.nan,
             }
 
             surface = stage["surface"] if "surface" in stage.keys() else "road"
@@ -384,6 +431,44 @@ def predict_from_startlist(
     df = pd.DataFrame(rows)
     if df.empty:
         return df
+
+    # Add stage classifier predictions
+    from model.stage_classifier import (
+        load as _load_clf, predict_proba as _clf_proba,
+        STAGE_FEATURES as _STAGE_FEATURES,
+    )
+    from features.builder import PROFILE_TYPES as _PROFILE_TYPES
+    _clf_bundle = _load_clf()
+    if _clf_bundle is not None:
+        # One-hot encode profile columns if not already present
+        for pt in _PROFILE_TYPES:
+            col = f"is_{pt}"
+            if col not in df.columns:
+                df[col] = (df["profile_type"] == pt).astype(int)
+        # Compute elevation_per_km if missing
+        if "elevation_per_km" not in df.columns:
+            df["elevation_per_km"] = df["elevation_m"] / df["distance_km"].replace(0, np.nan)
+        # Stage num norm — already in df; ensure STAGE_FEATURES columns exist
+        for col in _STAGE_FEATURES:
+            if col not in df.columns:
+                df[col] = np.nan
+        stage_meta = df.drop_duplicates("stage_id").set_index("stage_id")
+        proba = _clf_proba(stage_meta, _clf_bundle)
+        df = df.join(proba, on="stage_id")
+    else:
+        df["p_sprint"]    = np.nan
+        df["p_breakaway"] = np.nan
+        df["p_gc"]        = np.nan
+
+    _pb = df["p_breakaway"].fillna(0)
+    _ps = df["p_sprint"].fillna(0)
+    _pg = df["p_gc"].fillna(0)
+    df["p_breakaway_x_oneday"]      = _pb * df["oneday_top10_rate_365d"].fillna(0)
+    df["p_breakaway_x_break_rate"]  = _pb * df["break_top10_rate_365d"].fillna(0)
+    df["p_breakaway_x_gc_out"]      = _pb * df["gc_out_of_contention"].fillna(0)
+    df["p_breakaway_x_team_gc_out"] = _pb * df["team_gc_out_of_contention"].fillna(0)
+    df["p_sprint_x_flat_form"]      = _ps * df["flat_top10_rate_90d"].fillna(0)
+    df["p_gc_x_mountain_form"]      = _pg * df["mountain_top10_rate_90d"].fillna(0)
 
     df["top10_prob"] = model.predict_proba(df[feature_cols])[:, 1]
     df["predicted_top10"] = (df["top10_prob"] >= 0.5).astype(int)

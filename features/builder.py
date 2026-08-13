@@ -45,6 +45,18 @@ FEATURE_COLS = [
     "gradient_final_km", "profile_score",
     "gc_deficit_min", "gc_rank_before",
     "break_top10_rate_365d", "break_top10s_365d",
+    "punch_top10_rate_90d", "punch_avg_pos_90d",
+    "oneday_top10_rate_365d", "oneday_avg_pos_90d",
+    "is_punch_finish", "gradient_x_hilly", "profile_score_per_gradient",
+    "is_transition_stage",
+    "team_min_gc_deficit", "team_best_gc_rank",
+    "gc_out_of_contention", "team_gc_out_of_contention",
+    # Stage outcome probabilities (from stage classifier)
+    "p_sprint", "p_breakaway", "p_gc",
+    # Interactions: outcome probability × rider speciality
+    "p_breakaway_x_oneday", "p_breakaway_x_break_rate",
+    "p_breakaway_x_gc_out", "p_breakaway_x_team_gc_out",
+    "p_sprint_x_flat_form", "p_gc_x_mountain_form",
 ]
 
 
@@ -110,7 +122,7 @@ def build_features(
     log.info("loading data from DB …")
     with get_conn() as conn:
         results = pd.read_sql(
-            "SELECT id, stage_id, rider_id, position, status, time_seconds FROM results",
+            "SELECT id, stage_id, rider_id, position, status, time_seconds, bib FROM results",
             conn,
         )
         stages = pd.read_sql(
@@ -160,8 +172,23 @@ def build_features(
 
     # Join stage date onto results (needed for rolling)
     results = results.merge(
-        stages[["id", "date", "profile_type", "surface"]].rename(columns={"id": "stage_id"}),
+        stages[["id", "date", "profile_type", "surface", "gradient_final_km", "is_stage_race"]].rename(columns={"id": "stage_id"}),
         on="stage_id",
+    )
+
+    # ── team GC context ───────────────────────────────────────────────────────
+    # Group riders by team using bib // 10 — UCI stage races allocate bibs in
+    # blocks of 10 per team (1-8, 11-18, 21-28 …), so integer division is a
+    # reliable team proxy without needing a separate team lookup.
+    results["team_id"] = (results["bib"] // 10).where(results["bib"].notna())
+    _team_gc = (
+        results[results["is_stage_race"].fillna(0).astype(int) == 1]
+        .groupby(["stage_id", "team_id"])
+        .agg(
+            team_min_gc_deficit=("gc_deficit_min", "min"),
+            team_best_gc_rank=("gc_rank_before", "min"),
+        )
+        .reset_index()
     )
 
     # ── select target stages ──────────────────────────────────────────────────
@@ -179,18 +206,23 @@ def build_features(
 
     # ── base: one row per (rider, target stage) from results ──────────────────
     base = results[results["stage_id"].isin(target_stages["id"])].copy()
-    # Note: "surface" is already on base from the results→stages join above;
-    # omit it here to avoid a surface_x / surface_y collision on merge.
+    # Note: "surface", "gradient_final_km", and "is_stage_race" are already on
+    # base from the results→stages join above; omit them here to avoid _x/_y
+    # collision on merge.
     base = base.merge(
         target_stages[["id", "date", "distance_km", "elevation_m", "profile_type",
                         "prev_profile_type",
-                        "stage_num_norm", "is_stage_race", "race_name", "race_slug",
-                        "gradient_final_km", "profile_score"]].rename(
+                        "stage_num_norm", "race_name", "race_slug",
+                        "profile_score"]].rename(
             columns={"id": "stage_id", "date": "stage_date", "profile_type": "stage_profile"}
         ),
         on="stage_id",
     )
     base["top10"] = base["is_top10"].astype(float)
+
+    # Attach team GC stats via bib-based team_id (already on base from results)
+    base["team_id"] = (base["bib"] // 10).where(base["bib"].notna())
+    base = base.merge(_team_gc, on=["stage_id", "team_id"], how="left")
 
     # ── rolling features via self-join ────────────────────────────────────────
     # For each (rider, stage_date), we need stats from results where date < stage_date.
@@ -202,7 +234,7 @@ def build_features(
     # history = all results with dates, for rolling lookups
     hist = results[["rider_id", "date", "position", "is_finished",
                      "is_dnf", "is_top10", "is_win", "profile_type", "surface", "stage_id",
-                     "gc_rank_before"]].copy()
+                     "gc_rank_before", "gradient_final_km", "is_stage_race"]].copy()
 
     # Join base (rider, stage_date) onto hist on rider_id, then filter date < stage_date
     # We do this with a merge and then mask — tractable because we group immediately after
@@ -211,6 +243,8 @@ def build_features(
             "date": "hist_date", "stage_id": "hist_stage_id",
             "profile_type": "hist_profile", "surface": "hist_surface",
             "gc_rank_before": "hist_gc_rank",
+            "gradient_final_km": "hist_gradient",
+            "is_stage_race": "hist_is_stage_race",
         }),
         on="rider_id",
         how="left",
@@ -353,8 +387,46 @@ def build_features(
     attach(break_sub.groupby(["rider_id", "stage_id"])["is_top10"].sum(),  "break_top10s_365d")
     base["break_top10s_365d"] = base["break_top10s_365d"].fillna(0)
 
+    # ── punch-finish affinity ─────────────────────────────────────────────────
+    # Hilly stages with steep final km (>=5%) are classics/puncher territory,
+    # distinct from GC-style mountain stages or lumpy breakaway stages.
+    punch_sub = joined_ind[
+        (joined_ind["hist_profile"] == "hilly") &
+        (joined_ind["hist_gradient"].fillna(0) >= 5.0) &
+        (joined_ind["_day_delta"] <= 90)
+    ]
+    attach(punch_sub.groupby(["rider_id", "stage_id"])["is_top10"].mean(), "punch_top10_rate_90d")
+    attach(punch_sub.groupby(["rider_id", "stage_id"])["position"].mean(), "punch_avg_pos_90d")
+
+    # ── one-day race form (breakaway proxy) ───────────────────────────────────
+    # Riders who succeed in one-day races perform similarly in GT breakaways:
+    # both require attacking from a non-GC position and staying away.
+    oneday = joined_ind[joined_ind["hist_is_stage_race"].fillna(0) == 0]
+    attach(
+        oneday[oneday["_day_delta"] <= 365].groupby(["rider_id", "stage_id"])["is_top10"].mean(),
+        "oneday_top10_rate_365d",
+    )
+    attach(
+        oneday[oneday["_day_delta"] <= 90].groupby(["rider_id", "stage_id"])["position"].mean(),
+        "oneday_avg_pos_90d",
+    )
+
     # ── elevation density ─────────────────────────────────────────────────────
     base["elevation_per_km"] = base["elevation_m"] / base["distance_km"].replace(0, np.nan)
+
+    # ── GC & team out-of-contention flags ─────────────────────────────────────
+    # Riders / teams >10 min down have strong incentive to go in breaks.
+    # NaN (no GC data: stage 1 or one-day race) is left as NaN — HGBC handles it.
+    base["gc_out_of_contention"] = np.where(
+        base["gc_deficit_min"].notna(),
+        (base["gc_deficit_min"] > 10).astype(float),
+        np.nan,
+    )
+    base["team_gc_out_of_contention"] = np.where(
+        base["team_min_gc_deficit"].notna(),
+        (base["team_min_gc_deficit"] > 10).astype(float),
+        np.nan,
+    )
 
     # ── rider attributes ──────────────────────────────────────────────────────
     base = base.merge(
@@ -375,6 +447,28 @@ def build_features(
     base["is_cobbled"] = (base["surface"] == "cobbled").astype(int)
     base["is_gravel"]  = (base["surface"] == "gravel").astype(int)
 
+    # Punch-finish: hilly stage with steep final km → punchers/classics riders
+    base["is_punch_finish"] = (
+        (base["stage_profile"] == "hilly") &
+        (base["gradient_final_km"].fillna(0) >= 5.0)
+    ).astype(int)
+    # Continuous version for the model to interpolate on
+    base["gradient_x_hilly"] = (
+        base["gradient_final_km"].fillna(0) * (base["stage_profile"] == "hilly").astype(int)
+    )
+    # Breakaway-prone signal: high climbing load but gentle finish → peloton lets break go.
+    # profile_score captures total climbing difficulty; dividing by (gradient+1) isolates
+    # stages where the climbing is in the middle, not a steep final summit.
+    base["profile_score_per_gradient"] = (
+        base["profile_score"].fillna(0) / (base["gradient_final_km"].fillna(0) + 1.0)
+    )
+    # Transition stage: hilly or flat day after a mountain stage — teams recover,
+    # breakaways succeed at a much higher rate.
+    base["is_transition_stage"] = (
+        (base["prev_profile_type"] == "mountain") &
+        (base["stage_profile"].isin(["hilly", "flat"]))
+    ).astype(int)
+
     base["prev_stage_is_mountain"] = (base["prev_profile_type"] == "mountain").astype(int)
     base["prev_stage_is_hilly"]    = (base["prev_profile_type"] == "hilly").astype(int)
 
@@ -389,6 +483,33 @@ def build_features(
     base["tt_win_rate_x_itt"]      = base["tt_win_rate"].fillna(0)      * is_itt.astype(int)
     base["tt_avg_pos_365d_x_itt"]  = base["tt_avg_pos_365d"].fillna(50) * is_itt.astype(int)
     base["tt_avg_pos_90d_x_itt"]   = base["tt_avg_pos_90d"].fillna(50)  * is_itt.astype(int)
+
+    # ── stage outcome probabilities ───────────────────────────────────────────
+    # Load stage classifier (trained separately). If not yet available, fill with
+    # zeros so the main model trains without it and learns to ignore them.
+    from model.stage_classifier import load as _load_clf, predict_proba as _clf_proba
+    _clf_bundle = _load_clf()
+    if _clf_bundle is not None and not base.empty:
+        stage_meta = base.drop_duplicates("stage_id").set_index("stage_id")
+        proba = _clf_proba(stage_meta, _clf_bundle)
+        base = base.join(proba, on="stage_id")
+    else:
+        log.warning("stage classifier skipped (not trained or empty base) — p_sprint/p_breakaway/p_gc set to NaN")
+        base["p_sprint"] = np.nan
+        base["p_breakaway"] = np.nan
+        base["p_gc"] = np.nan
+
+    # ── stage outcome × rider skill interactions ──────────────────────────────
+    # Explicit products so the model doesn't have to discover them via splits.
+    _pb = base["p_breakaway"].fillna(0)
+    _ps = base["p_sprint"].fillna(0)
+    _pg = base["p_gc"].fillna(0)
+    base["p_breakaway_x_oneday"]     = _pb * base["oneday_top10_rate_365d"].fillna(0)
+    base["p_breakaway_x_break_rate"] = _pb * base["break_top10_rate_365d"].fillna(0)
+    base["p_breakaway_x_gc_out"]     = _pb * base["gc_out_of_contention"].fillna(0)
+    base["p_breakaway_x_team_gc_out"]= _pb * base["team_gc_out_of_contention"].fillna(0)
+    base["p_sprint_x_flat_form"]     = _ps * base["flat_top10_rate_90d"].fillna(0)
+    base["p_gc_x_mountain_form"]     = _pg * base["mountain_top10_rate_90d"].fillna(0)
 
     log.info("features built: %d rows, %d columns", len(base), len(base.columns))
     return base
@@ -417,6 +538,6 @@ def _load_races(conn) -> pd.DataFrame:
 
 def _load_riders(conn) -> pd.DataFrame:
     return pd.read_sql(
-        "SELECT id, pcs_slug, name, pcs_rank, speciality, weight_kg, height_cm, dob FROM riders",
+        "SELECT id, pcs_slug, name, team, pcs_rank, speciality, weight_kg, height_cm, dob FROM riders",
         conn,
     )

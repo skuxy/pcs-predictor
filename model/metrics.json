@@ -1,7 +1,7 @@
 {
-  "train_cutoff": "2026-07-14",
+  "train_cutoff": "2026-08-11",
   "val_race": "race/giro-d-italia/2024",
   "gender": "men",
-  "train_rows": 232436,
-  "n_features": 66
+  "train_rows": 234926,
+  "n_features": 87
 }
