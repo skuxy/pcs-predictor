@@ -37,6 +37,27 @@ STAGE_FEATURES = [
 
 # ── labelling ─────────────────────────────────────────────────────────────────
 
+def _label(row) -> str:
+    """Classify a single stage row into sprint / gc / breakaway."""
+    ptype = row["profile_type"]
+    if ptype in ("itt", "ttt"):
+        return "gc"  # solo / team effort — treat as GC-style for routing
+
+    n_zero  = row["n_zero_time"]
+    gc_rank = row["gc_rank_before"]  # NaN if stage 1 or one-day race
+    is_stage = int(row["is_stage_race"] or 0)
+
+    if n_zero >= 6:
+        return "sprint"
+
+    # Small group finish
+    if is_stage and pd.notna(gc_rank):
+        return "gc" if gc_rank <= 15 else "breakaway"
+
+    # One-day race or stage 1 (no GC rank yet): fall back to profile
+    return "sprint" if ptype == "flat" else "breakaway"
+
+
 def _compute_gc_ranks(results: pd.DataFrame, stages: pd.DataFrame) -> pd.DataFrame:
     """
     Compute winner's GC rank before each stage — same logic as features._gc_state
@@ -54,6 +75,9 @@ def _compute_gc_ranks(results: pd.DataFrame, stages: pd.DataFrame) -> pd.DataFra
     grp = [df["race_id"], df["rider_id"]]
     df["_cum_before"] = gap.groupby(grp).cumsum() - gap
     df["_n_before"] = gap.groupby(grp).cumcount()
+
+    if df.empty:
+        return pd.DataFrame(columns=["stage_id", "rider_id", "gc_rank_before"])
 
     valid = df[df["_n_before"] >= 1].copy()
     if valid.empty:
@@ -120,25 +144,6 @@ def label_stages(cutoff_date: str | None = None) -> pd.DataFrame:
     )
 
     # ── compute outcome label ─────────────────────────────────────────────────
-    def _label(row):
-        ptype = row["profile_type"]
-        if ptype in ("itt", "ttt"):
-            return "gc"  # solo / team effort — treat as GC-style for routing
-
-        n_zero = row["n_zero_time"]
-        gc_rank = row["gc_rank_before"]  # NaN if stage 1 or one-day race
-        is_stage = int(row["is_stage_race"] or 0)
-
-        if n_zero >= 6:
-            return "sprint"
-
-        # Small group finish
-        if is_stage and pd.notna(gc_rank):
-            return "gc" if gc_rank <= 15 else "breakaway"
-
-        # One-day race or stage 1 (no GC rank yet): fall back to profile
-        return "sprint" if ptype == "flat" else "breakaway"
-
     stages["outcome"] = stages.apply(_label, axis=1)
 
     # ── encode stage features needed for training ─────────────────────────────

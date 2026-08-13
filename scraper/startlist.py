@@ -9,7 +9,7 @@ log = logging.getLogger(__name__)
 
 def fetch_startlist(race_slug: str) -> list[dict]:
     """
-    Return [{slug, name, team, bib}] for all starters in a race.
+    Return [{slug, name, team}] for all starters in a race.
 
     PCS startlist page: race/NAME/YEAR/startlist
     Rider links appear as <a href="rider/SLUG">NAME</a>.
@@ -41,7 +41,7 @@ def fetch_startlist(race_slug: str) -> list[dict]:
             if team_link:
                 team = team_link.get_text(strip=True)
 
-        riders.append({"slug": slug, "name": name, "team": team, "bib": None})
+        riders.append({"slug": slug, "name": name, "team": team})
 
     log.info("startlist for %s: %d riders", race_slug, len(riders))
     return riders
