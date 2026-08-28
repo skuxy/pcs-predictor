@@ -1,0 +1,27 @@
+tests/test_scraper_results.py
+  s_00e3ed4731d62c::t_fe499d64f3d953 3
+  s_00e3ed4731d62c::t_35a0052d371e5b 56-60,65-72
+  s_00e3ed4731d62c::t_278c8629496c56 61-64
+tests/test_predict_gc.py
+  s_00e3ed4731d62c::t_0043e3dd36c4ba 1-64
+db/database.py
+  s_00e3ed4731d62c::t_1c0074cde4b783 173
+scraper/results.py
+  s_00e3ed4731d62c::t_3145ca3dea5ff0 88-109
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "7f12eb8ae7546cf939bb3f2a1d75360572e73a0f",
+  "prompts": {},
+  "sessions": {
+    "s_00e3ed4731d62c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "35aa2eca-9b77-4cb3-beba-041aee04c27a",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Borna Skukan <bskukan@daytona.io>"
+    }
+  }
+}
