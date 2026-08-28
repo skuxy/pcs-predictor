@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from sklearn import set_config
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import roc_auc_score, average_precision_score
@@ -14,6 +15,11 @@ from sklearn.model_selection import GroupKFold
 from features.builder import build_features, FEATURE_COLS
 
 log = logging.getLogger(__name__)
+
+# Without this, CalibratedClassifierCV silently drops the `groups` kwarg
+# passed to .fit() instead of routing it to GroupKFold's splitter, which then
+# raises "The 'groups' parameter should not be None." (sklearn SLEP006).
+set_config(enable_metadata_routing=True)
 
 MODEL_DIR  = Path("model")
 
