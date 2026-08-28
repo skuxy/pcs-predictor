@@ -170,7 +170,7 @@ def insert_result(conn: sqlite3.Connection, data: dict) -> None:
 
 def _load_results(conn) -> pd.DataFrame:
     return pd.read_sql(
-        "SELECT id, stage_id, rider_id, position, status, time_seconds FROM results", conn
+        "SELECT id, stage_id, rider_id, position, status, time_seconds, bib FROM results", conn
     )
 
 

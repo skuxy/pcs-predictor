@@ -1,6 +1,6 @@
 """Tests for result-table parsing, especially time-gap ditto marks."""
 from scraper.utils import soup
-from scraper.results import _parse_results_table
+from scraper.results import _parse_results_table, _looks_cancelled
 
 
 def _row(pos, slug, gap):
@@ -53,3 +53,20 @@ def test_dnf_rows_get_no_time():
     res = _parse_results_table(_table(rows))
     gaps = {r["rider_slug"]: r["time_seconds"] for r in res}
     assert gaps["quitter"] is None
+
+
+def test_looks_cancelled_flags_all_nr_placeholder_table():
+    # Cancelled/unraced stages render the startlist under table.results markup
+    # with every rider marked "NR" instead of a real finish position.
+    rows = (
+        _row("NR", "rider-a", "") + _row("NR", "rider-b", "") + _row("NR", "rider-d", "")
+        + _row("NR", "rider-e", "") + _row("NR", "rider-f", "") + _row("DNF", "rider-c", "")
+    )
+    res = _parse_results_table(_table(rows))
+    assert _looks_cancelled(res)
+
+
+def test_looks_cancelled_false_for_real_results():
+    rows = _row(1, "winner", "4:00:00") + _row(2, "second", "0:05")
+    res = _parse_results_table(_table(rows))
+    assert not _looks_cancelled(res)

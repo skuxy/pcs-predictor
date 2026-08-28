@@ -85,7 +85,28 @@ def fetch_stage_results(stage_slug: str) -> list[dict]:
         log.warning("no results table on %s", stage_slug)
         return []
 
-    return _parse_results_table(table)
+    results = _parse_results_table(table)
+    if _looks_cancelled(results):
+        log.warning(
+            "stage %s has no real finishing positions (all 'NR' placeholders) — "
+            "likely a cancelled/unraced stage, skipping", stage_slug,
+        )
+        return []
+    return results
+
+
+def _looks_cancelled(results: list[dict]) -> bool:
+    """True if a 'results' table is actually a startlist rendered under the
+    same markup — PCS does this for cancelled/neutralised stages, showing every
+    non-DNF rider with an 'NR' placeholder (in team-roster order) instead of a
+    real finish position."""
+    if not results:
+        return False
+    ranked = [r for r in results if r["status"] == "finished"]
+    if ranked:
+        return False
+    nr_count = sum(1 for r in results if r["status"] == "unknown")
+    return nr_count / len(results) > 0.8
 
 
 def _parse_results_table(table) -> list[dict]:
