@@ -185,6 +185,7 @@ def train(cutoff_date: str | None = None) -> None:
         max_depth=4,
         min_samples_leaf=10,
         random_state=42,
+        verbose=1,
     )
     clf.fit(X, y)
 

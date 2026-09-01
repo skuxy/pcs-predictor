@@ -90,16 +90,30 @@ def train(
     y_val   = val_df[y_col]
 
     # HistGradientBoosting handles NaN natively — no imputer needed
+    #
+    # max_iter=500 mostly runs to the cap without early stopping converging
+    # first (verified: 5-fold CV on ~209k rows / 111 features hit 300-500/500
+    # boosting rounds per fold) — 300 (matching the stage classifier's own
+    # budget) cuts ~30% of that CPU time for a <0.002 AUC / <0.004 AP change.
+    # verbose=1 makes each boosting round log a progress line (to stdout) so
+    # a long-running fit is visibly making progress instead of going silent
+    # for the whole training/calibration step, which previously looked
+    # indistinguishable from a hang.
     base = HistGradientBoostingClassifier(
-        max_iter=500,
+        max_iter=300,
         learning_rate=0.05,
         max_depth=4,
         min_samples_leaf=20,
         class_weight="balanced",
         random_state=42,
+        verbose=1,
     )
+    # n_jobs=1 (explicit): each fold's HistGradientBoostingClassifier.fit()
+    # already saturates all available cores internally via its own OpenMP
+    # thread pool, so folds must run one at a time — running them
+    # concurrently (n_jobs>1) would oversubscribe every core N-fold-fits-deep.
     cv = GroupKFold(n_splits=5)
-    model = CalibratedClassifierCV(base, cv=cv, method="isotonic")
+    model = CalibratedClassifierCV(base, cv=cv, method="isotonic", n_jobs=1)
 
     log.info("training …")
     model.fit(X_train, y_train, groups=train_df["stage_id"].values)
