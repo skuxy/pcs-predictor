@@ -1,0 +1,21 @@
+model/train.py
+  s_650b63ed7f9ff7::t_d30468cdbf8bc0 93-101,103,109,111-114,116
+model/stage_classifier.py
+  s_650b63ed7f9ff7::t_47ea936760974b 188
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "cd0f0e1e1f51b159195a60ec3e81b7525e69ce89",
+  "prompts": {},
+  "sessions": {
+    "s_650b63ed7f9ff7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e22530ff-1dd1-4e81-81fb-282fab93f050",
+        "model": "unknown"
+      },
+      "human_author": "Borna Skukan <bskukan@daytona.io>"
+    }
+  }
+}
