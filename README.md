@@ -94,6 +94,34 @@ Mountain stages are most predictable (GC riders dominate). Hilly stages are hard
 
 ---
 
+## Team UCI points chart
+
+A second deliverable next to the predictor: how the 2026 UCI points of the top
+30 men's teams (official UCI team ranking, licence cycle 2026-2028) built up
+week by week, with each team's biggest weeks and headline wins (Monuments,
+World titles, Grand Tours, WorldTour wins) annotated with the riders and
+results behind them (e.g. *Pogačar: Tour de France GC 1st + 5 stage wins*,
+*Seixas wins Il Lombardia*). Tadej Pogačar's own points are plotted next to
+the teams for comparison (alone he would rank 21st on all-rider points, 20th
+against the official listing).
+
+```bash
+python main.py scrape-uci-points --season 2026 --teams all     # official ranking + every scoring rider's dated points
+python main.py team-points --season 2026 --top 30 \
+    --out-json out/team_points_2026_men.json --out-html out/team-points.html
+```
+
+`team-points` writes a self-contained HTML page (no external requests; light
+and dark mode; an *All riders* / *Best 20 riders (UCI rule)* toggle), the JSON
+payload behind it, and a markdown summary on stdout. Data source: PCS's
+official team ranking, each team's per-rider breakdown, and every
+contributing rider's dated results, GC leader-jersey points and UCI sanctions.
+The weekly ledger reproduces the per-team PCS points pages for 29 of the top
+30 teams (MBH Bank's page counts two riders tied on 20th place). See [RUNBOOK.md](RUNBOOK.md#team-uci-points-weekly-chart)
+for how it works and its caveats.
+
+---
+
 ## UI
 
 ```bash
@@ -132,6 +160,16 @@ python main.py predict race/ronde-van-vlaanderen/2026 --cutoff 2026-04-06
 
 # Backtest
 python main.py backtest --race race/paris-nice/2026 --cutoff 2026-03-08
+
+# Fill in / repair results of finished races
+python main.py scrape-missing --year 2026 --min-results 5
+python main.py repair-points --year 2026
+python main.py refresh-stages --year 2026 --null-gaps --uci-mismatch   # re-sync stale stages (RUNBOOK)
+
+# Team UCI points: scrape, then build the weekly chart (options are passed through
+# to scripts/scrape_uci_points.py and scripts/team_points_report.py; add --help)
+python main.py scrape-uci-points --season 2026 --teams all
+python main.py team-points --season 2026 --top 30 --out-json out/tp.json --out-html out/team-points.html
 ```
 
 See [RUNBOOK.md](RUNBOOK.md) for detailed recipes including sharing the database between machines, adding ProSeries races, and the full new-season pipeline.
@@ -149,10 +187,18 @@ pcs-predictor/
 │   ├── results.py         # stage result tables
 │   ├── riders.py          # rider profile pages
 │   ├── startlist.py       # start list scraping (upcoming races)
+│   ├── uci_points.py      # UCI team ranking, team breakdowns, rider UCI points pages
 │   └── gpx.py             # GPX file parsing & climb detection
 ├── db/
 │   ├── schema.sql         # SQLite schema
-│   └── database.py        # upsert helpers
+│   ├── database.py        # upsert helpers
+│   └── uci_points.py      # team UCI points tables (ranking, breakdown, rider results, sanctions, spells)
+├── analysis/
+│   ├── team_points.py     # weekly team ledger, jump detection + labels, chart payload
+│   └── team_points_chart.py # self-contained HTML chart for the payload
+├── scripts/
+│   ├── scrape_uci_points.py   # `main.py scrape-uci-points`
+│   └── team_points_report.py  # `main.py team-points`
 ├── features/
 │   └── builder.py         # vectorised feature engineering
 ├── model/
@@ -160,7 +206,7 @@ pcs-predictor/
 │   ├── predict.py         # inference (results-based + start-list-based)
 │   └── backtest.py        # evaluation metrics
 ├── tests/                 # pytest test suite
-├── data/cycling.db        # SQLite database (tracked in git, ~10 MB)
+├── data/cycling.db        # SQLite database (tracked in git, ~49 MB incl. the UCI points tables)
 ├── model/trained_model.pkl  # trained model (tracked in git)
 ├── model/metrics.json     # latest validation metrics
 ├── model/feature_names.json # feature column list

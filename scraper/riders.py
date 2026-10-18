@@ -1,8 +1,10 @@
 """Scrape rider profiles from ProCyclingStats."""
+import datetime
 import logging
 import re
 
 from scraper.utils import fetch, soup, pcs_url
+from scraper.races import parse_label_pairs
 
 log = logging.getLogger(__name__)
 
@@ -19,35 +21,34 @@ def fetch_rider(slug: str) -> dict | None:
 
 def _parse_rider(s, slug: str) -> dict:
     """
-    Verified PCS rider page structure:
+    Parse a PCS rider page.  Two markups are supported.
 
-    Name: <h1>Tadej Pogačar</h1>
+    Live markup (Oct 2026):
+      Name:  <div class="page-title"><div class="title"><h1>Tadej Pogačar</h1></div>
+             <div class="subtitle"><h2>UAE Team Emirates - XRG</h2></div></div>
+             (the h2 is the rider's CURRENT team)
+      Info:  one flat run of label/value divs, rows separated by <br>:
+        <div class="bold mr5">Date of birth:</div><div class="mr4">21st</div>
+        <div class="mr4">September 1998 (28)</div><br>
+        <div class="bold mr5">Nationality:</div><div><span class="flag si"></span></div>
+        <div><a href="nation/slovenia">Slovenia</a></div><br>
+        <div class="bold mr5">Weight: </div><div>66</div><div>kg</div>
+        <div class="bold mr5">Height: </div><div>1.76</div><div> m</div><br>
+      Team history: ul.rdr-teams2 > li > div.season "2026" + div.name > a[href^="team/"]
+                    (future contract seasons are listed too, e.g. "2027-2032").
+      Rankings: ul.list.horizontal li > div > a "PCS Ranking" + div value.
+      The site-wide nav menu also links every WorldTeam (team/xds-astana-team-2026 ...)
+      — those links must never be read as the rider's team.
 
-    Info blocks — each lives in its own  div > ul.list > li:
-      <li>
-        <div class="bold mr5">Date of birth:</div>
-        <div class="mr3">21st</div>
-        <div class="mr3">September</div>
-        <div class="mr3">1998</div>  ...
-      </li>
-
-    Weight/Height share one li:
-      <div class="bold mr5">Weight:</div>
-      <div class="mr3">66</div><div class="mr10">kg</div>
-      <div class="bold mr5">Height:</div>
-      <div class="mr3">1.76</div><div>m</div>
-
-    Nationality:
-      <div class="bold mr5">Nationality:</div>
-      <div><span class="flag si"></span></div>
-      <div><a href="nation/slovenia">Slovenia</a></div>
-
-    Current team: found via <a href="team/..."> in the info section.
+    Legacy markup: each label in its own ``ul.list > li`` with
+    ``div.bold`` label + value divs (same label names), team under a "Team"
+    label, ranking under a "... ranking" label.
 
     Speciality bars — ul.pps.list > li each containing:
       div.xbar  (width class encodes score, e.g. "w93")
       div.xvalue  (numeric score)
-      div.xtitle  (label: "Onedayraces", "GC", "TT", "Sprint", "Hills")
+      div.xtitle  (label: "Oneday"/"Onedayraces", "GC", "TT", "Sprint",
+                   "Climber", "Hills")
     """
     data: dict = {
         "pcs_slug": slug,
@@ -65,40 +66,31 @@ def _parse_rider(s, slug: str) -> dict:
     if h1:
         data["name"] = h1.get_text(strip=True)
 
-    # Parse all ul.list info blocks
-    for li in s.select("ul.list li"):
-        label_el = li.find("div", class_=re.compile(r"bold"))
-        if not label_el:
-            continue
-        label = label_el.get_text(strip=True).rstrip(":").lower()
-        siblings = label_el.find_next_siblings("div")
-        values = [d.get_text(strip=True) for d in siblings]
+    for label, els in parse_label_pairs(s).items():
+        values = [e.get_text(" ", strip=True) for e in els]
+        values = [v for v in values if v]
 
-        if "date of birth" in label or "born" in label:
-            # values: ["21st", "September", "1998", "(", "27", ")"]
-            data["dob"] = _parse_dob_parts(values)
+        if "date of birth" in label or label == "born":
+            # values: ["21st", "September 1998 (28)"] or legacy
+            # ["21st", "September", "1998", "(", "27", ")"]
+            data["dob"] = _parse_dob_parts(" ".join(values).split())
 
         elif "nationality" in label:
-            # Last div usually has the country link text
-            for sib in reversed(siblings):
-                txt = sib.get_text(strip=True)
-                if txt:
-                    data["nationality"] = txt
-                    break
+            if values:
+                data["nationality"] = values[-1]
 
-        elif "weight" in label:
-            # "66" + "kg" — may also contain Height in the same li
+        elif label.startswith("weight"):
             nums = [v for v in values if re.match(r"^\d", v)]
             if nums:
                 data["weight_kg"] = _parse_float(nums[0])
-            # Height follows: look for "m" unit
+            # Legacy single-li layout: "66", "kg", "Height:", "1.76", "m"
             height_idx = next((i for i, v in enumerate(values) if v == "m"), None)
-            if height_idx and height_idx > 0:
+            if height_idx and height_idx > 0 and data["height_cm"] is None:
                 h = _parse_float(values[height_idx - 1])
                 if h:
                     data["height_cm"] = round(h * 100, 1)
 
-        elif "height" in label:
+        elif label.startswith("height"):
             nums = [v for v in values if re.match(r"^\d", v)]
             if nums:
                 h = _parse_float(nums[0])
@@ -107,36 +99,77 @@ def _parse_rider(s, slug: str) -> dict:
                 elif h:
                     data["height_cm"] = h
 
-        elif "team" in label:
-            a = li.find("a", href=re.compile(r"team/"))
-            if a:
-                data["team"] = a.get_text(strip=True)
+        elif label in ("team", "current team"):
+            for el in els:
+                a = el if el.name == "a" else el.find("a", href=re.compile(r"^/?team/"))
+                if a is not None:
+                    data["team"] = a.get_text(strip=True)
+                    break
 
-        elif "ranking" in label:
-            for v in values:
-                clean = re.sub(r"[^\d]", "", v)
-                if clean:
-                    try:
-                        rank = int(clean)
-                        if 0 < rank < 10000:
-                            data["pcs_rank"] = rank
-                            break
-                    except Exception:
-                        pass
+        elif "ranking" in label and data["pcs_rank"] is None:
+            data["pcs_rank"] = _rank_from_values(values)
 
-    # Fallback team: first team/ link outside nav
-    if not data["team"]:
-        for a in s.select("a[href^='team/']"):
-            href = a["href"]
-            # skip nav links (they have year in them like team/uae-2026)
-            if re.search(r"\d{4}$", href):
-                data["team"] = a.get_text(strip=True)
-                break
+    data["team"] = _current_team(s) or data["team"]
+
+    if data["pcs_rank"] is None:
+        data["pcs_rank"] = _pcs_rank_from_links(s)
 
     # Speciality from the ul.pps.list bar chart
     data["speciality"] = _parse_speciality(s)
 
     return data
+
+
+def _current_team(s, season: int | None = None) -> str | None:
+    """The rider's current team: the page subtitle (div.page-title h2), else
+    the latest ``ul.rdr-teams2`` entry whose season is not in the future."""
+    sub = s.select_one("div.page-title div.subtitle h2") or s.select_one("div.page-title h2")
+    if sub is not None and sub.get_text(strip=True):
+        return sub.get_text(strip=True)
+    season = season or datetime.date.today().year
+    best = None
+    for li in s.select("ul.rdr-teams2 > li"):
+        season_el = li.select_one("div.season")
+        a = li.find("a", href=re.compile(r"^/?team/"))
+        if season_el is None or a is None:
+            continue
+        years = [int(y) for y in re.findall(r"\d{4}", season_el.get_text())]
+        if not years or min(years) > season:
+            continue
+        start = min(years)
+        if best is None or start > best[0]:
+            best = (start, a.get_text(strip=True))
+    return best[1] if best else None
+
+
+def _rank_from_values(values: list[str]) -> int | None:
+    for v in values:
+        clean = re.sub(r"[^\d]", "", v)
+        if clean:
+            try:
+                rank = int(clean)
+            except ValueError:
+                continue
+            if 0 < rank < 10000:
+                return rank
+    return None
+
+
+def _pcs_rank_from_links(s) -> int | None:
+    """Live markup: <li><div><a href="rankings/me/individual">PCS Ranking</a></div>
+    <div class="bg grey2 bold ...">1</div></li>."""
+    for a in s.find_all("a", href=re.compile(r"rankings/")):
+        if a.get_text(strip=True).lower() != "pcs ranking":
+            continue
+        li = a.find_parent("li")
+        if li is None:
+            continue
+        holder = a.find_parent("div")
+        values = [d.get_text(strip=True) for d in li.find_all("div") if d is not holder]
+        rank = _rank_from_values(values)
+        if rank:
+            return rank
+    return None
 
 
 def _parse_speciality(s) -> str | None:
@@ -169,11 +202,12 @@ def _parse_speciality(s) -> str | None:
         return None
 
     mapping = {
-        "onedayraces": "classics",
+        "oneday": "classics",       # "Onedayraces" (legacy) / "Oneday" (live)
         "gc": "gc",
         "tt": "tt",
         "sprint": "sprinter",
         "hills": "climber",
+        "climber": "climber",
     }
     for key, val in mapping.items():
         if key in best_label:
@@ -193,8 +227,8 @@ def _parse_dob_parts(values: list[str]) -> str | None:
     }
     day = month = year = None
     for v in values:
-        if v == "(":
-            break   # age in parentheses follows — stop here
+        if v.startswith("("):
+            break   # age in parentheses follows — stop here ("(" or "(28)")
         if re.match(r"^\d{4}$", v):
             year = int(v)
         elif v.lower() in months:

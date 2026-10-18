@@ -55,8 +55,11 @@ CREATE TABLE IF NOT EXISTS results (
     status      TEXT DEFAULT 'finished', -- finished/dnf/dns/otl/dsq
     time_seconds INTEGER,               -- seconds behind leader (0 for winner)
     points_pcs  INTEGER,
-    points_uci  INTEGER,
+    points_uci  INTEGER,                -- UCI placing points EARNED (sanctions excluded; TTT shares can be fractional)
     bib         INTEGER,
+    team_slug   TEXT,                   -- PCS team slug with season, e.g. "bahrain-victorious-2026"
+    team_name   TEXT,                   -- team as shown on the result row
+    uci_penalty INTEGER,                -- UCI points deducted (positive) shown on this result, NULL = none
     UNIQUE(stage_id, rider_id)
 );
 
