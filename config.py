@@ -1,3 +1,5 @@
+import os
+
 PCS_BASE = "https://www.procyclingstats.com"
 
 # Scraping behaviour
@@ -5,7 +7,7 @@ REQUEST_DELAY = 1.5        # seconds between requests
 REQUEST_TIMEOUT = 30       # seconds
 MAX_RETRIES = 3
 CACHE_DIR = "cache/html"   # raw HTML cache to avoid re-fetching
-DB_PATH = "data/cycling.db"
+DB_PATH = os.environ.get("PCS_DB_PATH", "data/cycling.db")  # override to work on a copy
 
 # Data range
 SCRAPE_YEARS = [2023, 2024]  # years of results to collect

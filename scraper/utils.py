@@ -1,4 +1,6 @@
+import os
 import time
+import atexit
 import hashlib
 import pathlib
 import logging
@@ -47,31 +49,103 @@ _cache_path = cache_path
 
 def _is_cloudflare_challenge(html: str) -> bool:
     """Return True if the page is a Cloudflare JS challenge rather than real content."""
-    return "Just a moment" in html and "cf-mitigated" in html.lower() or \
-           "Checking if the site connection is secure" in html
+    return (
+        "<title>Just a moment" in html
+        or "Checking if the site connection is secure" in html
+        or ("Just a moment" in html and "challenge-platform" in html)
+    )
+
+
+# Once plain requests get a Cloudflare challenge, every later request in this
+# process goes straight to the browser instead of paying for a doomed request.
+_browser_only = False
+# Lazily started (playwright, browser, page) shared by every browser fetch —
+# launching Chromium per URL costs seconds, a page navigation costs ~1 s.
+_browser = None
+
+
+def _find_chromium_executable() -> Optional[str]:
+    """Locate a Chromium binary when Playwright's own bundled build is missing.
+
+    Pre-provisioned environments (CI images, cloud sandboxes) often ship a
+    Chromium for a different Playwright release; any recent build passes the
+    Cloudflare check. ``PCS_CHROMIUM_EXECUTABLE`` overrides the search.
+    """
+    override = os.environ.get("PCS_CHROMIUM_EXECUTABLE")
+    if override:
+        return override
+    root = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if not root:
+        return None
+    for pattern in ("chromium-*/chrome-linux*/chrome", "chromium-*/chrome-mac*/Chromium.app/Contents/MacOS/Chromium"):
+        hits = sorted(pathlib.Path(root).glob(pattern), reverse=True)
+        if hits:
+            return str(hits[0])
+    return None
+
+
+def _launch_chromium(pw):
+    kwargs = {"headless": True}
+    # Chromium ignores HTTPS_PROXY; pass it explicitly so egress-proxied hosts work.
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    if proxy:
+        kwargs["proxy"] = {"server": proxy}
+    try:
+        return pw.chromium.launch(**kwargs)
+    except Exception as exc:
+        exe = _find_chromium_executable()
+        if not exe:
+            raise
+        log.info("bundled chromium unavailable (%s) — using %s", str(exc).splitlines()[0], exe)
+        return pw.chromium.launch(executable_path=exe, **kwargs)
+
+
+def _browser_page():
+    global _browser
+    if _browser is None:
+        from playwright.sync_api import sync_playwright
+
+        pw = sync_playwright().start()
+        try:
+            browser = _launch_chromium(pw)
+        except Exception:
+            pw.stop()
+            raise
+        context = browser.new_context(user_agent=SESSION.headers["User-Agent"], locale="en-GB")
+        _browser = (pw, browser, context.new_page())
+        atexit.register(close_browser)
+    return _browser[2]
+
+
+def close_browser() -> None:
+    """Shut down the shared browser (safe to call repeatedly)."""
+    global _browser
+    if _browser is None:
+        return
+    pw, browser, _ = _browser
+    _browser = None
+    try:
+        browser.close()
+    finally:
+        pw.stop()
 
 
 def fetch_with_playwright(url: str) -> Optional[str]:
-    """Fetch a URL using a headless Chromium browser (bypasses Cloudflare challenges)."""
+    """Fetch a URL using a headless Chromium browser (bypasses Cloudflare challenges).
+
+    Reuses one browser page for the whole process; a crashed browser is
+    restarted once before giving up on the URL.
+    """
     try:
-        from playwright.sync_api import sync_playwright
+        import playwright  # noqa: F401
     except ImportError:
         log.warning("playwright not installed — cannot bypass Cloudflare challenge")
         return None
 
     log.info("playwright fetch: %s", url)
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                    "Version/17.4.1 Safari/605.1.15"
-                ),
-                locale="en-GB",
-            )
-            page = context.new_page()
+    for attempt in (1, 2):
+        try:
+            page = _browser_page()
             # Use "domcontentloaded" — PCS keeps background XHRs open so "networkidle"
             # times out. After DOM is ready, wait up to 8 s for CF challenge to auto-resolve.
             page.goto(url, wait_until="domcontentloaded", timeout=60_000)
@@ -92,14 +166,14 @@ def fetch_with_playwright(url: str) -> Optional[str]:
             except Exception:
                 pass
             html = page.content()
-            browser.close()
             if _is_cloudflare_challenge(html):
                 log.warning("playwright: still on Cloudflare challenge page for %s", url)
                 return None
             return html
-    except Exception as exc:
-        log.warning("playwright fetch failed for %s: %s", url, exc)
-        return None
+        except Exception as exc:
+            log.warning("playwright fetch failed for %s (attempt %d): %s", url, attempt, exc)
+            close_browser()
+    return None
 
 
 # Keep underscore alias for any external callers during transition.
@@ -112,7 +186,7 @@ def fetch(url: str, use_cache: bool = True) -> Optional[str]:
     Falls back to a headless Playwright browser if the server returns a
     Cloudflare challenge (403 / 'Just a moment...' page).
     """
-    global _last_request
+    global _last_request, _browser_only
 
     cache_file = cache_path(url)
     if use_cache and cache_file.exists():
@@ -133,21 +207,26 @@ def fetch(url: str, use_cache: bool = True) -> Optional[str]:
         time.sleep(REQUEST_DELAY - elapsed)
 
     html: Optional[str] = None
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            _last_request = time.time()
-            resp = SESSION.get(url, timeout=REQUEST_TIMEOUT)
-            if resp.status_code == 403 or _is_cloudflare_challenge(resp.text):
-                log.info("Cloudflare challenge detected for %s — switching to playwright", url)
-                html = fetch_with_playwright(url)
+    if _browser_only:
+        _last_request = time.time()
+        html = fetch_with_playwright(url)
+    else:
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                _last_request = time.time()
+                resp = SESSION.get(url, timeout=REQUEST_TIMEOUT)
+                if resp.status_code == 403 or _is_cloudflare_challenge(resp.text):
+                    log.info("Cloudflare challenge detected for %s — switching to playwright", url)
+                    _browser_only = True
+                    html = fetch_with_playwright(url)
+                    break
+                resp.raise_for_status()
+                html = resp.text
                 break
-            resp.raise_for_status()
-            html = resp.text
-            break
-        except requests.RequestException as exc:
-            log.warning("attempt %d/%d failed for %s: %s", attempt, MAX_RETRIES, url, exc)
-            if attempt < MAX_RETRIES:
-                time.sleep(REQUEST_DELAY * attempt)
+            except requests.RequestException as exc:
+                log.warning("attempt %d/%d failed for %s: %s", attempt, MAX_RETRIES, url, exc)
+                if attempt < MAX_RETRIES:
+                    time.sleep(REQUEST_DELAY * attempt)
 
     if html:
         pathlib.Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
