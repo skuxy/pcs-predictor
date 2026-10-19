@@ -30,11 +30,16 @@ Source tables (one season each):
 ``rider_uci_results``
     ``rider/<slug>/results`` rows of the season merged with the GC
     leader-jersey points from the rider's UCI-ranking page (``status =
-    'leader'``, ``result_label = 'Leader jersey after Stage 6'``).  The UCI
-    season can open in late October of the previous calendar year (results
-    dated before 1 January that UCI counts in this season).
+    'leader'``, ``result_label = 'Leader jersey after Stage 6'``) — scoring
+    rows only (zero-point race days are not stored).  The UCI season can open
+    in late October of the previous calendar year (results dated before 1
+    January that UCI counts in this season).
+``rider_uci_scrapes``
+    One row per scraped rider: the last result date his pages reached
+    (:func:`data_through`) and his page name.
 ``rider_uci_penalties``
-    UCI sanction points (positive numbers; subtracted here).
+    UCI sanction points (positive numbers; subtracted here), with the race
+    they were imposed in (``race_slug`` / ``race_class``).
 ``rider_team_spells``
     Mid-season transfers: which team a rider rode for when.
 
@@ -522,15 +527,41 @@ def _penalty_label(race_name: str) -> tuple[str, str]:
     return name.strip(), f"Penalty ({label.strip()})" if label.strip() else "Penalty"
 
 
+def match_penalty_race(race_name: Optional[str], day: str,
+                       rows: Iterable[Sequence]) -> tuple[Optional[str], Optional[str]]:
+    """(race_slug, race_class) of the race a penalty was imposed in, or (None, None).
+
+    ``rows``: the rider's result rows as (date, race_name, race_slug,
+    race_class).  The fines page names the race ('Tour de France | Stage 20',
+    'E3 Saxo Classic'), the results page too ('E3 Saxo Classic ME'): rows of
+    the same race (names compared after :func:`clean_race_name`) are the
+    candidates, the one on the penalty's day first, else the nearest in date.
+    Used when a penalty is stored (with the rider's full result list, zero-
+    point rows included — often the only row of the race) and, for penalties
+    stored without one, by :func:`load_events`.
+    """
+    key = _norm_key(clean_race_name(_penalty_label(race_name)[0]))
+    cands = [r for r in rows if _norm_key(clean_race_name(r[1])) == key]
+    same_day = [r for r in cands if r[0] == day]
+    best = (same_day or sorted(cands, key=lambda r: abs(
+        (date.fromisoformat(r[0]) - date.fromisoformat(day)).days)))[:1]
+    return (best[0][2], best[0][3]) if best else (None, None)
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
 def load_events(conn: sqlite3.Connection, season: int = 2026,
                 rider_slugs: Optional[Iterable[str]] = None) -> pd.DataFrame:
     """Every points event of the season, before team attribution.
 
     Result rows of ``rider_uci_results`` with non-zero ``points_uci`` plus one
     negative row per ``rider_uci_penalties`` entry (``result_kind='penalty'``,
-    ``points = -penalty_points``, race_slug borrowed from the rider's result
-    row of the same race).  Columns: :data:`LEDGER_COLUMNS` minus the team
-    columns, ``rider_name`` as stored (converted later).
+    ``points = -penalty_points``, race_slug / race_class as stored with the
+    penalty, else borrowed from the rider's result row of the same race —
+    :func:`match_penalty_race`).  Columns: :data:`LEDGER_COLUMNS` minus the
+    team columns, ``rider_name`` as stored (converted later).
     """
     cols = ["date", "rider_slug", "rider_name", "race_name", "race_slug", "result_label",
             "result_kind", "race_class", "position", "status", "points"]
@@ -553,27 +584,27 @@ def load_events(conn: sqlite3.Connection, season: int = 2026,
         if slugs is not None:
             pwhere += f" AND rider_slug IN ({', '.join('?' * len(slugs))})"
             pparams += slugs
-        # race_slug / class for a penalty: the rider's own results row of that race
+        # race_slug / class for a penalty: stored with it (resolved from the
+        # rider's full result list), else the rider's own scoring row of that race
+        stored = "race_slug, race_class" if {"race_slug", "race_class"} <= _columns(
+            conn, "rider_uci_penalties") else "NULL, NULL"
         races = defaultdict(list)
         for slug, d, rname, rslug, rcls in conn.execute(
                 "SELECT rider_slug, date, race_name, race_slug, race_class FROM rider_uci_results "
                 f"WHERE season = ?{' AND rider_slug IN (' + ', '.join('?' * len(slugs)) + ')' if slugs else ''}",
                 [season] + (slugs or [])):
-            races[slug].append((d, _norm_key(clean_race_name(rname)), rslug, rcls))
-        for slug, d, rname, pts in conn.execute(
-                f"SELECT rider_slug, date, race_name, penalty_points FROM rider_uci_penalties WHERE {pwhere}",
-                pparams):
+            races[slug].append((d, rname, rslug, rcls))
+        for slug, d, rname, pts, pslug, pcls in conn.execute(
+                f"SELECT rider_slug, date, race_name, penalty_points, {stored} FROM rider_uci_penalties "
+                f"WHERE {pwhere}", pparams):
             if not pts:
                 continue
             name, label = _penalty_label(rname)
-            key = _norm_key(clean_race_name(name))
-            cands = [r for r in races.get(slug, []) if r[1] == key]
-            same_day = [r for r in cands if r[0] == d]
-            best = (same_day or sorted(cands, key=lambda r: abs(
-                (date.fromisoformat(r[0]) - date.fromisoformat(d)).days)))[:1]
+            if pslug is None and pcls is None:
+                pslug, pcls = match_penalty_race(rname, d, races.get(slug, []))
             pens.append({"date": d, "rider_slug": slug, "rider_name": None, "race_name": name,
-                         "race_slug": best[0][2] if best else None, "result_label": label,
-                         "result_kind": "penalty", "race_class": best[0][3] if best else None,
+                         "race_slug": pslug, "result_label": label,
+                         "result_kind": "penalty", "race_class": pcls,
                          "position": None, "status": "penalty", "points": -abs(float(pts))})
     if pens:
         res = pd.concat([res, pd.DataFrame(pens, columns=cols)], ignore_index=True)
@@ -585,16 +616,20 @@ def load_events(conn: sqlite3.Connection, season: int = 2026,
 def _rider_names(conn: sqlite3.Connection, season: int, breakdown: pd.DataFrame) -> dict[str, tuple[str, str]]:
     """rider_slug -> (display name, surname).
 
-    The rider page's name (``rider_uci_results.rider_name``, the <h1>) wins
-    over the breakdown's (approximate when PCS lists 'SURNAME Given').
+    The rider page's name (the <h1>: ``rider_uci_scrapes.rider_name``, or
+    ``rider_uci_results.rider_name`` for a DB without scrape records) wins
+    over the breakdown's (approximate when PCS lists 'SURNAME Given').  The
+    scrape record also names riders with no scoring row (only sanctions).
     """
     names: dict[str, str] = {}
     for slug, nm in zip(breakdown["rider_slug"], breakdown["rider_name"]):
         if nm:
             names[slug] = nm
-    if _table_exists(conn, "rider_uci_results"):
+    for table in ("rider_uci_scrapes", "rider_uci_results"):
+        if not _table_exists(conn, table):
+            continue
         for slug, nm in conn.execute(
-                "SELECT rider_slug, MAX(rider_name) FROM rider_uci_results WHERE season = ? "
+                f"SELECT rider_slug, MAX(rider_name) FROM {table} WHERE season = ? "
                 "GROUP BY rider_slug", (season,)):
             if nm:
                 names[slug] = nm
@@ -721,11 +756,19 @@ def load_rider_ledger(conn: sqlite3.Connection, rider_slug: str, season: int = 2
 
 
 def data_through(conn: sqlite3.Connection, season: int = 2026) -> Optional[str]:
-    """Last result date in the data (any rider_uci_results row of the season, or a penalty)."""
+    """Last result date the scraped rider pages reach.
+
+    The latest of: ``rider_uci_scrapes.last_date`` (the last row each rider's
+    pages listed, zero-point rows included — rider_uci_results keeps scoring
+    rows only, so its own MAX(date) is the last *scoring* result, possibly
+    days earlier), any ``rider_uci_results`` row (a DB without scrape records)
+    and any penalty of the season.
+    """
     best = None
-    for table in ("rider_uci_results", "rider_uci_penalties"):
+    for table, col in (("rider_uci_scrapes", "last_date"), ("rider_uci_results", "date"),
+                       ("rider_uci_penalties", "date")):
         if _table_exists(conn, table):
-            d = conn.execute(f"SELECT MAX(date) FROM {table} WHERE season = ?", (season,)).fetchone()[0]
+            d = conn.execute(f"SELECT MAX({col}) FROM {table} WHERE season = ?", (season,)).fetchone()[0]
             if d and (best is None or d > best):
                 best = d
     return best

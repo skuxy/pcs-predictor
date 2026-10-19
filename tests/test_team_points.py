@@ -1013,3 +1013,107 @@ def test_cli_html_renderer_missing(db_path, tmp_path, capsys, monkeypatch):
     assert out_json.exists() and not (tmp_path / "p.html").exists()
     captured = capsys.readouterr()
     assert "cannot render HTML" in captured.err and "| # | Team |" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# rider_uci_results holds scoring rows only (db.uci_points): the readers
+# must not change when the zero-point rows of an older DB are pruned
+# ---------------------------------------------------------------------------
+
+def _with_zero_point_rows(src, dst):
+    """Copy of the synthetic DB plus zero-point rows the readers once needed:
+    del Toro's only Vuelta a Burgos row (his sanction's race), Pogačar's last
+    race day (the "data through" date), and a sanction-only rider whose page
+    name (<h1>) only his zero-point row carries."""
+    import shutil
+    shutil.copy(src, dst)
+    conn = sqlite3.connect(dst)
+    conn.executemany(
+        "INSERT INTO rider_uci_results (season, rider_slug, rider_name, date, race_name, race_slug, "
+        "result_label, result_kind, race_class, position, status, points_uci, points_pcs, result_url) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [
+            _result("isaac-del-toro", "Isaac del Toro", "2026-08-12", "Vuelta a Burgos", "Stage 1", "stage",
+                    40, None, "race/vuelta-a-burgos-2026-stage-1", "race/vuelta-a-burgos/2026", "2.Pro"),
+            _result("tadej-pogacar", "Tadej Pogačar", "2026-08-20", "Late Race", "", "oneday", 12, None,
+                    "race/late-race-2026-result", "race/late-race/2026", "1.1"),
+            _result("penny-only", "Penny Only", "2026-05-03", "Gamma GP", "", "oneday", 80, None,
+                    "race/gamma-gp-2026-result", "race/gamma-gp/2026", "1.1")])
+    conn.execute("INSERT INTO uci_team_breakdown (season, team_slug, team_name, team_class, rider_slug, "
+                 "rider_name, nth_best, points_counted, points_not_counted, sanction_points) VALUES "
+                 "(2026, 'team-gamma-2026', 'Bardiani CSF 7 Saber', 'PRT', 'penny-only', 'ONLY P', 2, "
+                 "NULL, NULL, 10)")
+    conn.execute("INSERT INTO rider_uci_penalties (season, rider_slug, date, race_name, penalty_points) "
+                 "VALUES (2026, 'penny-only', '2026-05-03', 'Gamma GP', 10)")
+    conn.commit()
+    conn.close()
+
+
+def test_readers_unchanged_after_pruning_zero_point_rows(db_path, tmp_path):
+    from db.uci_points import prune_zero_point_results
+    path = tmp_path / "legacy.db"
+    _with_zero_point_rows(db_path, path)
+
+    def read():
+        c = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            led = tp.load_points_ledger(c, 2026)
+            pens = led[led["result_kind"] == "penalty"].set_index("rider_slug")
+            names = tp._rider_names(c, 2026, tp.load_breakdown(c, 2026))
+            payload = tp.build_chart_payload(c, season=2026, top_n=3, generated_at="2026-08-21 12:00")
+            return led, pens, names, tp.data_through(c, 2026), payload
+        finally:
+            c.close()
+    led0, pens0, names0, through0, payload0 = read()
+    assert through0 == "2026-08-20"
+    assert pens0.loc["isaac-del-toro", "race_slug"] == "race/vuelta-a-burgos/2026"
+    assert pens0.loc["isaac-del-toro", "race_class"] == "2.Pro"
+    assert pens0.loc["penny-only", "race_slug"] == "race/gamma-gp/2026"
+    assert names0["penny-only"] == ("Penny Only", "Only")
+
+    conn = sqlite3.connect(path)
+    got = prune_zero_point_results(conn, 2026)
+    conn.commit()
+    assert got["deleted"] == 4 and got["penalties_resolved"] == 3
+    assert conn.execute("SELECT COUNT(*) FROM rider_uci_results WHERE points_uci IS NULL").fetchone()[0] == 0
+    conn.close()
+
+    led1, pens1, names1, through1, payload1 = read()
+    assert through1 == through0                       # from rider_uci_scrapes.last_date
+    pd.testing.assert_frame_equal(led1, led0)         # penalties keep their race (stored column)
+    assert names1 == names0                           # sanction-only rider: name from his scrape record
+    assert payload1 == payload0
+
+
+def test_penalty_race_stored_wins_over_lookup(tmp_path):
+    path = tmp_path / "p.db"
+    build_db(path)
+    conn = sqlite3.connect(path)
+    conn.execute("UPDATE rider_uci_penalties SET race_slug = 'race/vuelta-a-burgos/2026', race_class = '2.Pro' "
+                 "WHERE rider_slug = 'isaac-del-toro'")
+    conn.commit()
+    ev = tp.load_events(conn, 2026)
+    ev = ev[ev["result_kind"] == "penalty"].set_index("rider_slug")
+    assert tuple(ev.loc["isaac-del-toro", ["race_slug", "race_class"]]) == ("race/vuelta-a-burgos/2026", "2.Pro")
+    # a penalty without one still borrows the rider's (scoring) row of that race
+    assert ev.loc["tadej-pogacar", "race_slug"] == "race/ronde-van-vlaanderen/2026"
+    # a DB from before the columns existed (read-only, never migrated) reads the same way
+    conn.executescript("""
+        CREATE TABLE p2 AS SELECT season, rider_slug, date, race_name, penalty_points, fine, article
+                           FROM rider_uci_penalties;
+        DROP TABLE rider_uci_penalties; ALTER TABLE p2 RENAME TO rider_uci_penalties;""")
+    old = tp.load_events(conn, 2026)
+    old = old[old["result_kind"] == "penalty"].set_index("rider_slug")
+    assert old.loc["tadej-pogacar", "race_slug"] == "race/ronde-van-vlaanderen/2026"
+    assert pd.isna(old.loc["isaac-del-toro", "race_slug"])
+    conn.close()
+
+
+def test_match_penalty_race():
+    rows = [("2026-03-27", "E3 Saxo Classic ME", "race/e3-harelbeke/2026", "1.UWT"),
+            ("2026-07-04", "Tour de France", "race/tour-de-france/2026", "2.UWT"),
+            ("2026-07-25", "Tour de France", "race/tour-de-france/2026", "2.UWT")]
+    assert tp.match_penalty_race("E3 Saxo Classic", "2026-03-27", rows) == ("race/e3-harelbeke/2026", "1.UWT")
+    assert tp.match_penalty_race("Tour de France | Stage 20", "2026-07-24", rows) == (
+        "race/tour-de-france/2026", "2.UWT")   # nearest day of the race
+    assert tp.match_penalty_race("Giro d'Italia | Stage 3", "2026-05-11", rows) == (None, None)
+    assert tp.match_penalty_race(None, "2026-05-11", []) == (None, None)

@@ -168,6 +168,11 @@ def test_fill_stage_meta_only_fills_nulls(old_db):
     ([(1, "finished", 10)] + [(p, "finished", None) for p in range(2, 30)], True, {"ttt_shares_missing"}),
     ([(p, "finished", 8.57) for p in range(1, 8)] + [(p, "finished", None) for p in range(8, 30)],
      True, set()),
+    # La Vuelta Femenina 2023 stage 1 (a TTT stored as 'flat' from the GC tab):
+    # only the leader's 8 points among ~150 finishers
+    ([(1, "finished", 8)] + [(p, "finished", None) for p in range(2, 30)], False, {"single_scorer"}),
+    ([(1, "finished", 8)] + [(p, "finished", None) for p in range(2, 20)], False, set()),  # small field
+    ([(p, "finished", None) for p in range(1, 30)], False, set()),        # neutralised stage
 ])
 def test_uci_points_anomalies(rows, ttt, expected):
     assert uci_points_anomalies(rows, is_ttt=ttt) == expected
@@ -337,6 +342,61 @@ def test_repair_points_command(cli_db, monkeypatch):
     assert calls == []                      # nothing left to repair
 
 
+def test_repair_points_stores_ttt_shares_for_a_gc_tab_stage(cli_db, monkeypatch):
+    # A team time trial stored from the GC tab under a road profile: one
+    # 8-point leader among the finishers.  repair-points flags it
+    # (single_scorer), takes the TTT page's shares and positions, and marks
+    # the stage 'ttt'; a DNS on the TTT page loses his finish.
+    riders = [f"rider-{i:02d}" for i in range(1, 26)]
+    with _conn(cli_db) as conn:
+        conn.executemany("INSERT INTO riders (pcs_slug, name) VALUES (?, ?)", [(r, r) for r in riders])
+        conn.execute("""INSERT INTO races (pcs_slug, name, year, start_date, end_date, class, is_stage_race,
+                        gender) VALUES ('race/ttt-race/2026', 'TTT race', 2026, '2026-06-01', '2026-06-03',
+                        '2.WWT', 1, 'women')""")
+        race_id = conn.execute("SELECT id FROM races WHERE pcs_slug = 'race/ttt-race/2026'").fetchone()[0]
+        conn.execute("INSERT INTO stages (race_id, pcs_slug, date, profile_type) VALUES (?, ?, ?, 'flat')",
+                     (race_id, "race/ttt-race/2026/stage-1", "2026-06-01"))
+        stage_id = conn.execute("SELECT id FROM stages WHERE pcs_slug = 'race/ttt-race/2026/stage-1'"
+                                ).fetchone()[0]
+        for i, r in enumerate(riders, 1):
+            conn.execute("""INSERT INTO results (stage_id, rider_id, position, status, time_seconds, points_uci)
+                            SELECT ?, id, ?, 'finished', 0, ? FROM riders WHERE pcs_slug = ?""",
+                         (stage_id, i, 8 if i == 1 else None, r))
+        conn.commit()
+
+    def fake_results(slug):
+        assert slug == "race/ttt-race/2026/stage-1"
+        rows = []
+        for i, r in enumerate(riders, 1):
+            row = dict(_row(r, i, 7.14 if i <= 7 else 0), team_time_trial=True, time_seconds=i)
+            if r == "rider-25":
+                row.update(position=None, status="dns", time_seconds=None)
+            rows.append(row)
+        return rows
+    monkeypatch.setattr(main, "fetch_stage_results", fake_results)
+    with _conn(cli_db) as conn:
+        flagged = {s["pcs_slug"]: s["reasons"] for s in find_implausible_uci_stages(conn, 2026)}
+    assert flagged["race/ttt-race/2026/stage-1"] == ["single_scorer"]
+    main.cmd_repair_points(argparse.Namespace(year=2026, gender="women", races=None, dry_run=False))
+    with _conn(cli_db) as conn:
+        assert conn.execute("SELECT profile_type FROM stages WHERE id = ?", (stage_id,)).fetchone()[0] == "ttt"
+        got = conn.execute("""SELECT COUNT(*), SUM(points_uci = 7.14) FROM results WHERE stage_id = ?""",
+                           (stage_id,)).fetchone()
+        assert tuple(got) == (25, 7)
+        dns = conn.execute("""SELECT position, status, time_seconds FROM results x JOIN riders rd
+                              ON rd.id = x.rider_id WHERE x.stage_id = ? AND rd.pcs_slug = 'rider-25'""",
+                           (stage_id,)).fetchone()
+        assert tuple(dns) == (None, "dns", None)
+        assert find_implausible_uci_stages(conn, 2026, "women") == []
+
+
+def test_init_db_creates_rider_alias_table(new_db):
+    with _conn(new_db) as conn:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(rider_slug_aliases)")]
+    assert cols == ["old_slug", "new_slug", "evidence", "merged_at", "valid_until"]
+    init_db(new_db)                                  # idempotent
+
+
 def _stage(slug, date=None):
     return {"pcs_slug": slug, "stage_num": None, "date": date, "distance_km": None,
             "elevation_m": None, "profile_type": None, "surface": "road", "departure": None,
@@ -457,11 +517,15 @@ def _seed_refresh(path):
             (1, 1, 1, "finished", 0, 20), (1, 2, 2, "finished", None, 10), (1, 5, 3, "finished", None, 5),
             (2, 1, 1, "finished", 0, 20), (2, 2, 2, "finished", 0, 10), (2, 3, 3, "finished", 0, 5),
             (2, 4, 4, "finished", 0, None)])
-        # rider pages: stage 2 order was corrected (second/third swapped)
+        # rider pages (scoring rows only): stage 1 agrees; stage 2 order was
+        # corrected (second/third swapped)
         conn.executemany("""INSERT INTO rider_uci_results (season, rider_slug, date, race_slug, result_label,
                             result_kind, position, status, points_uci, result_url)
-                            VALUES (2026, ?, '2026-03-02', 'race/r/2026', 'Stage 2', 'stage', ?, 'finished', ?,
-                                    'race/r-2026-stage-2')""", [("winner", 1, 20), ("second", 3, 5)])
+                            VALUES (2026, ?, ?, 'race/r/2026', ?, 'stage', ?, 'finished', ?, ?)""", [
+            ("winner", "2026-03-01", "Stage 1 (ITT)", 1, 20, "race/r-2026-stage-1"),
+            ("second", "2026-03-01", "Stage 1 (ITT)", 2, 10, "race/r-2026-stage-1"),
+            ("winner", "2026-03-02", "Stage 2", 1, 20, "race/r-2026-stage-2"),
+            ("second", "2026-03-02", "Stage 2", 3, 5, "race/r-2026-stage-2")])
 
 
 def test_refresh_selectors(cli_db):
@@ -472,6 +536,90 @@ def test_refresh_selectors(cli_db):
         mism = find_stages_disagreeing_with_rider_results(conn, 2026)
         assert [(s["pcs_slug"], s["reasons"]) for s in mism] == [
             ("race/r/2026/stage-2", ["positions_differ", "uci_points_differ"])]
+
+
+def _seed_mismatch(path):
+    """Stored stages vs rider pages that still hold their zero-point rows (as
+    the scraper stored them before rider_uci_results became scoring-only).
+
+    Riders: a, b scraped (pages through 2026-04-01), c never scraped, d a
+    partial scrape (complete = 0), e scraped but his pages end 2026-03-02."""
+    with _conn(path) as conn:
+        conn.executemany("INSERT INTO riders (pcs_slug, name) VALUES (?, ?)",
+                         [(s, s.upper()) for s in ("a", "b", "c", "d", "e")])
+        conn.executemany("""INSERT INTO races (pcs_slug, name, year, start_date, end_date, class, is_stage_race,
+                            gender) VALUES (?, ?, 2026, ?, ?, '2.1', 1, 'men')""", [
+            ("race/r/2026", "R", "2026-03-01", "2026-03-20"), ("race/old-name/2026", "Old", "2026-04-01", "2026-04-01")])
+        stages = {1: "2026-03-01", 2: "2026-03-02", 3: "2026-03-03", 4: "2026-03-04", 5: "2026-03-05",
+                  6: "2026-03-20"}
+        conn.executemany("INSERT INTO stages (race_id, pcs_slug, date, profile_type) VALUES (1, ?, ?, 'flat')",
+                         [(f"race/r/2026/stage-{n}", d) for n, d in stages.items()])
+        conn.execute("INSERT INTO stages (race_id, pcs_slug, date, profile_type) "
+                     "VALUES (2, 'race/old-name/2026/stage-1', '2026-04-01', 'flat')")
+        rid = {s: i for i, s in enumerate("abcde", 1)}
+        stored = [  # stage id, rider, position, points
+            (1, "a", 1, 20), (1, "b", 2, 10), (1, "c", 3, None),
+            (2, "a", 1, 20), (2, "b", 2, 10),             # b's page: 2nd, but no points
+            (3, "a", 11, None), (3, "b", 12, None),       # order outside the points corrected
+            (4, "c", 1, 20), (4, "a", 2, 10), (4, "b", 3, 5),
+            (5, "d", 1, 20), (5, "a", 2, 10),             # d's page for stage 5 failed
+            (6, "e", 1, 20),                              # after e's pages were fetched
+            (7, "a", 1, 10), (7, "b", 2, None),           # renamed race, a's page: 2nd
+        ]
+        conn.executemany("INSERT INTO results (stage_id, rider_id, position, status, points_uci) "
+                         "VALUES (?, ?, ?, 'finished', ?)", [(s, rid[r], p, pts) for s, r, p, pts in stored])
+        page = [  # rider, stage, position, points
+            ("a", 1, 1, 20), ("b", 1, 2, 10), ("a", 2, 1, 20), ("b", 2, 2, None),
+            ("a", 3, 12, None), ("b", 3, 11, None), ("a", 4, 2, 10), ("b", 4, 3, 5), ("a", 5, 2, 10),
+            ("d", 1, 9, None), ("e", 1, 7, None), ("e", 2, 8, None)]
+        rows = [(r, stages[n], "race/r/2026", f"Stage {n}", p, pts, f"race/r-2026-stage-{n}")
+                for r, n, p, pts in page]
+        rows += [("a", "2026-04-01", "race/new-name/2026", "Stage 1", 2, 10, "race/new-name-2026-stage-1"),
+                 ("b", "2026-04-01", "race/new-name/2026", "Stage 1", 1, None, "race/new-name-2026-stage-1")]
+        conn.executemany("""INSERT INTO rider_uci_results (season, rider_slug, rider_name, date, race_slug,
+                            result_label, result_kind, position, status, points_uci, result_url)
+                            VALUES (2026, ?, 'X', ?, ?, ?, 'stage', ?, 'finished', ?, ?)""", rows)
+        conn.execute("""INSERT INTO rider_uci_scrapes (season, rider_slug, rows_seen, scoring_rows, first_date,
+                        last_date, complete) VALUES (2026, 'd', 1, 0, '2026-03-01', '2026-03-01', 0)""")
+
+
+def _mismatches(path):
+    with _conn(path) as conn:
+        return [(s["pcs_slug"], s["reasons"]) for s in find_stages_disagreeing_with_rider_results(conn, 2026)]
+
+
+def test_uci_mismatch_same_with_and_without_zero_point_rows(new_db):
+    from db.uci_points import prune_zero_point_results
+    _seed_mismatch(new_db)
+    before = _mismatches(new_db)
+    assert before == [("race/r/2026/stage-2", ["uci_points_differ"]),
+                      ("race/r/2026/stage-3", ["positions_differ"]),
+                      ("race/old-name/2026/stage-1", ["positions_differ"])]
+    with _conn(new_db) as conn:
+        assert prune_zero_point_results(conn, 2026, penalty_race=lambda *a: (None, None))["deleted"] == 7
+    # stage 2: b has no row any more — a scraped rider with no row scored 0;
+    # stage 3: only non-scoring places moved, no rows left to compare (accepted);
+    # the renamed race is still matched with a single scorer on the page
+    assert _mismatches(new_db) == [("race/r/2026/stage-2", ["uci_points_differ"]),
+                                   ("race/old-name/2026/stage-1", ["positions_differ"])]
+
+
+def test_uci_mismatch_missing_row_judged_only_for_covered_riders(new_db):
+    from db.uci_points import prune_zero_point_results
+    _seed_mismatch(new_db)
+    with _conn(new_db) as conn:
+        prune_zero_point_results(conn, 2026, penalty_race=lambda *a: (None, None))
+        # c (never scraped), d (partial), e (stage after his pages) are not judged:
+        # stages 4, 5, 6 are not flagged.  Once e's pages reach stage 6 he is.
+        conn.execute("UPDATE rider_uci_scrapes SET last_date = '2026-03-20' WHERE rider_slug = 'e'")
+    assert ("race/r/2026/stage-6", ["uci_points_differ"]) in _mismatches(new_db)
+    with _conn(new_db) as conn:  # his points are on the page: agreement
+        conn.execute("""INSERT INTO rider_uci_results (season, rider_slug, date, race_slug, result_label,
+                        result_kind, position, status, points_uci, result_url) VALUES (2026, 'e', '2026-03-20',
+                        'race/r/2026', 'Stage 6', 'stage', 1, 'finished', 20, 'race/r-2026-stage-6')""")
+        # d's scrape record says partial: even a later stage is not judged
+        conn.execute("UPDATE rider_uci_scrapes SET last_date = '2026-12-31' WHERE rider_slug = 'd'")
+    assert [s for s, _ in _mismatches(new_db)] == ["race/r/2026/stage-2", "race/old-name/2026/stage-1"]
 
 
 def test_refresh_stages_command_syncs_rows(cli_db, monkeypatch):
@@ -509,6 +657,149 @@ def test_refresh_stages_command_syncs_rows(cli_db, monkeypatch):
         assert conn.execute("SELECT COUNT(*) FROM riders WHERE pcs_slug = 'tom-pidcock'").fetchone()[0] == 0
         assert find_null_gap_stages(conn, 2026) == []
         assert find_stages_disagreeing_with_rider_results(conn, 2026) == []
+
+
+def test_refresh_dup_positions_turns_annulled_finishes_into_dsq(cli_db, monkeypatch):
+    """Giro 2023 stage 2: Baudin's struck 157th was stored as a finish next to
+    Kirsch's 157th.  The selector finds such stages (DB only); the refresh
+    stores the annulled row as dsq.  A tie PCS prints itself stays."""
+    from db.database import find_duplicate_position_stages
+    _seed_refresh(cli_db)
+    with _conn(cli_db) as conn:
+        conn.execute("UPDATE results SET position = 2 WHERE stage_id = 2 AND rider_id = 3")   # annulled
+        conn.execute("UPDATE results SET position = 2, time_seconds = 7 WHERE stage_id = 1 AND rider_id = 5")
+        conn.execute("UPDATE results SET time_seconds = 7 WHERE stage_id = 1 AND rider_id = 2")   # ITT tie
+        conn.execute("INSERT INTO stages (race_id, pcs_slug, date, profile_type) "
+                     "VALUES (1, 'race/r/2026/stage-3', '2026-03-03', 'ttt')")
+        conn.executemany("INSERT INTO results (stage_id, rider_id, position, status) VALUES (3, ?, 1, 'finished')",
+                         [(1,), (2,)])   # a team time trial: never selected
+        conn.commit()
+        assert [(s["pcs_slug"], s["reasons"]) for s in find_duplicate_position_stages(conn, 2026)] == [
+            ("race/r/2026/stage-1", ["duplicate_positions(1)"]), ("race/r/2026/stage-2", ["duplicate_positions(1)"])]
+    pages = {"race/r/2026/stage-1": [_row("winner", 1, 20), dict(_row("second", 2, 10), time_seconds=7),
+                                     dict(_row("itt-rider", 2, 5), time_seconds=7)],
+             "race/r/2026/stage-2": [_row("winner", 1, 20), _row("second", 2, 10),
+                                     dict(_row("thomas-pidcock", None), status="dsq", time_seconds=None),
+                                     _row("gone", 3)]}
+    monkeypatch.setattr(main, "fetch_stage_results", lambda slug: [dict(r) for r in pages[slug]])
+    monkeypatch.setattr(main, "fetch_stage_meta", lambda slug: {})
+    main.cmd_refresh_stages(argparse.Namespace(year=2026, gender=None, races=None, null_gaps=False,
+                                               uci_mismatch=False, dup_positions=True, stages=None, dry_run=False))
+    with _conn(cli_db) as conn:
+        got = conn.execute("""SELECT rd.pcs_slug, x.position, x.status FROM results x JOIN riders rd
+                              ON rd.id = x.rider_id WHERE x.stage_id = 2 ORDER BY rd.id""").fetchall()
+        assert [tuple(r) for r in got] == [("winner", 1, "finished"), ("second", 2, "finished"),
+                                           ("thomas-pidcock", None, "dsq"), ("gone", 3, "finished")]
+        # only the tie PCS prints itself is left
+        assert [s["pcs_slug"] for s in find_duplicate_position_stages(conn, 2026)] == ["race/r/2026/stage-1"]
+
+
+def _seed_gender(path):
+    """Tour El Salvador stored as 'men' (calendar circuit 16, no marker in the
+    name): its riders ride women's races elsewhere."""
+    with _conn(path) as conn:
+        conn.execute("""INSERT INTO races (pcs_slug, name, year, start_date, end_date, class, is_stage_race, gender)
+                        VALUES ('race/vuelta-el-salvador/2026', 'Tour El Salvador', 2026, '2026-01-17',
+                                '2026-01-21', '2.1', 1, 'men')""")
+        sal = conn.execute("SELECT id FROM races WHERE pcs_slug = 'race/vuelta-el-salvador/2026'").fetchone()[0]
+        conn.execute("INSERT INTO stages (race_id, pcs_slug, date) VALUES (?, 'race/vuelta-el-salvador/2026/stage-1', "
+                     "'2026-01-17')", (sal,))
+        st = conn.execute("SELECT id FROM stages WHERE race_id = ?", (sal,)).fetchone()[0]
+        women = conn.execute("SELECT id FROM stages WHERE pcs_slug = 'race/women-race/2026'").fetchone()[0]
+        for i in range(6):
+            conn.execute("INSERT INTO riders (pcs_slug, name) VALUES (?, ?)", (f"w{i}", f"W {i}"))
+            rid = conn.execute("SELECT id FROM riders WHERE pcs_slug = ?", (f"w{i}",)).fetchone()[0]
+            conn.execute("INSERT INTO results (stage_id, rider_id, position, status) VALUES (?, ?, ?, 'finished')",
+                         (st, rid, i + 1))
+            if i < 4:   # four of six also rode a women's race; two locals did not
+                conn.execute("INSERT INTO results (stage_id, rider_id, position, status) "
+                             "VALUES (?, ?, ?, 'finished')", (women, rid, i + 1))
+        conn.commit()
+    return sal
+
+
+def test_race_gender_suspects_and_correction(cli_db, monkeypatch):
+    from db.database import find_race_gender_suspects
+    sal = _seed_gender(cli_db)
+    with _conn(cli_db) as conn:
+        got = find_race_gender_suspects(conn, 2026)
+    assert [(r["pcs_slug"], r["gender"], r["other_gender_riders"], r["riders"]) for r in got] == [
+        ("race/vuelta-el-salvador/2026", "men", 4, 6)]   # the men's races of the seed are not suspects
+    pages = []
+    monkeypatch.setattr(main, "fetch_stage_meta", lambda slug: pages.append(slug) or {"race_category": "WE"})
+    main.main(["race-gender", "--year", "2026", "--dry-run"])
+    with _conn(cli_db) as conn:
+        assert conn.execute("SELECT gender FROM races WHERE id = ?", (sal,)).fetchone()[0] == "men"
+    main.main(["race-gender", "--year", "2026"])
+    assert pages[-1] == "race/vuelta-el-salvador/2026/stage-1"
+    with _conn(cli_db) as conn:
+        assert conn.execute("SELECT gender FROM races WHERE id = ?", (sal,)).fetchone()[0] == "women"
+        assert find_race_gender_suspects(conn, 2026) == []
+    # a men's race whose page says ME is left alone, even with --all
+    monkeypatch.setattr(main, "fetch_stage_meta", lambda slug: {"race_category": "ME"}
+                        if "women" not in slug and "salvador" not in slug else {"race_category": "WE"})
+    main.main(["race-gender", "--year", "2026", "--all"])
+    with _conn(cli_db) as conn:
+        assert dict(conn.execute("SELECT pcs_slug, gender FROM races").fetchall())["race/gp-clean/2026"] == "men"
+
+
+def test_scrape_sets_race_gender_from_the_page(cli_db, monkeypatch):
+    sal = _seed_gender(cli_db)
+    with _conn(cli_db) as conn:
+        conn.execute("INSERT INTO stages (race_id, pcs_slug, date) VALUES (?, 'race/vuelta-el-salvador/2026/stage-2', "
+                     "'2026-01-18')", (sal,))
+    stage = {"pcs_slug": "race/vuelta-el-salvador/2026/stage-2", "stage_num": 2, "date": "2026-01-18",
+             "distance_km": None, "elevation_m": None, "profile_type": "flat", "surface": "road",
+             "departure": None, "arrival": None, "gpx_path": None}
+    monkeypatch.setattr(main, "fetch_race_stages", lambda slug: [stage])
+    monkeypatch.setattr(main, "fetch_stage_results", lambda slug: [_row("w0", 1)])
+    monkeypatch.setattr(main, "fetch_stage_meta", lambda slug: {"race_category": "WE", "distance_km": 120.0})
+    main._scrape_race_results(sal, "race/vuelta-el-salvador/2026", skip_riders=True)
+    with _conn(cli_db) as conn:
+        assert conn.execute("SELECT gender FROM races WHERE id = ?", (sal,)).fetchone()[0] == "women"
+
+
+def test_rescrape_keeps_the_gender_the_page_set(cli_db, monkeypatch):
+    """A second `scrape` skips the stages that have results, so it never reads
+    the page again: the calendar row's guess ('men', no marker in 'Tour El
+    Salvador') must not overwrite the gender the first run took from it."""
+    sal = _seed_gender(cli_db)
+    calendar_row = {"pcs_slug": "race/vuelta-el-salvador/2026", "name": "Tour El Salvador", "year": 2026,
+                    "start_date": "2026-01-17", "end_date": "2026-01-22", "class": "2.1", "country": "sv",
+                    "is_stage_race": 1, "gender": "men"}
+    stage = {"pcs_slug": "race/vuelta-el-salvador/2026/stage-1", "stage_num": 1, "date": "2026-01-17",
+             "distance_km": None, "elevation_m": None, "profile_type": "flat", "surface": "road",
+             "departure": None, "arrival": None, "gpx_path": None}
+    with _conn(cli_db) as conn:   # the seeded stage has results: let the first run scrape it
+        conn.execute("DELETE FROM results WHERE stage_id = (SELECT id FROM stages WHERE pcs_slug = ?)",
+                     (stage["pcs_slug"],))
+    pages = []
+    monkeypatch.setattr(main, "iter_races", lambda years, circuits=None: iter([dict(calendar_row)]))
+    monkeypatch.setattr(main, "fetch_race_stages", lambda slug: [dict(stage)])
+    monkeypatch.setattr(main, "fetch_stage_results", lambda slug: [_row("w0", 1)])
+    monkeypatch.setattr(main, "fetch_stage_meta", lambda slug: pages.append(slug) or {"race_category": "WE"})
+    args = argparse.Namespace(years="2026", gender="men", skip_riders=True)
+    for _ in range(2):
+        main.cmd_scrape(args)
+        with _conn(cli_db) as conn:
+            row = conn.execute("SELECT gender, end_date FROM races WHERE id = ?", (sal,)).fetchone()
+        assert tuple(row) == ("women", "2026-01-22")   # other calendar fields still update
+    assert pages == [stage["pcs_slug"]]                 # the second run read no page
+
+
+def test_upsert_race_sets_gender_on_insert_only(new_db):
+    row = {"pcs_slug": "race/gp-oetingen/2026", "name": "GP Oetingen", "year": 2026, "start_date": "2026-03-01",
+           "end_date": "2026-03-01", "class": "1.2", "country": "be", "is_stage_race": 0, "gender": "men"}
+    with _conn(new_db) as conn:
+        rid = database.upsert_race(conn, row)
+        assert conn.execute("SELECT gender FROM races WHERE id = ?", (rid,)).fetchone()[0] == "men"
+        conn.execute("UPDATE races SET gender = 'women' WHERE id = ?", (rid,))   # the page said WE
+        assert database.upsert_race(conn, {**row, "class": "1.1"}) == rid
+        assert tuple(conn.execute("SELECT gender, class FROM races WHERE id = ?", (rid,)).fetchone()) == \
+            ("women", "1.1")
+        conn.execute("UPDATE races SET gender = NULL WHERE id = ?", (rid,))      # unknown: the guess fills it
+        database.upsert_race(conn, {**row, "gender": "women"})
+        assert conn.execute("SELECT gender FROM races WHERE id = ?", (rid,)).fetchone()[0] == "women"
 
 
 def test_refresh_never_prunes_on_a_short_page(cli_db, monkeypatch):

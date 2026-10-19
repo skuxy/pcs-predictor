@@ -4,6 +4,7 @@
     python scripts/scrape_uci_points.py --season 2026 --teams top30
     python scripts/scrape_uci_points.py --season 2026 --teams all --db /tmp/copy.db \\
         --report /tmp/uci_reconciliation.json
+    python scripts/scrape_uci_points.py --prune-zero --all-seasons --vacuum   # maintenance only
 
 Steps (every page goes through scraper.utils.fetch: HTML cache + rate limit, so
 a re-run only fetches what is not cached yet; every write is an upsert or a
@@ -13,7 +14,8 @@ per-rider replace, so re-runs are idempotent):
 2. team/<slug>/results/ranking-<cycle>       -> uci_team_breakdown      (per team)
    team/<slug>/results/latest-uci-points     -> uci_team_recent_points  (reconciliation aid)
 3. per rider with points, biggest first:
-   rider/<slug>/results (season rows)        -> rider_uci_results
+   rider/<slug>/results (season rows)        -> rider_uci_results (scoring rows only)
+                                                + rider_uci_scrapes (what the pages showed)
    rider.php?...&s=uci-world-ranking&date=D  -> points of every row, plus the
        GC leader-jersey points and previous-year items the results page lacks
        (D = the official listing's date; the page covers the 52 weeks to D)
@@ -27,6 +29,13 @@ per-rider replace, so re-runs are idempotent):
 6. per-rider and per-team reconciliation report (log + optional JSON).
 
 A page that fails to fetch is logged and skipped; the run carries on and exits 2.
+
+Maintenance (no PCS traffic, no scrape): ``--prune-zero`` deletes the
+zero-point rows a DB stored before rider_uci_results became scoring-only (the
+``--season``, or every season with ``--all-seasons``), after backfilling the
+scrape records and the penalties' races they were needed for
+(``db.uci_points.prune_zero_point_results``); ``--vacuum`` then rewrites the
+file at its new size.  Both print the file size before and after.
 """
 from __future__ import annotations
 
@@ -165,6 +174,35 @@ def team_for_date(spells: list[dict], day: str):
 # reconciliation
 # ---------------------------------------------------------------------------
 
+def _scraped_riders(conn: sqlite3.Connection, season: int) -> set[str]:
+    """Riders whose pages were stored: a scrape record (riders who scored
+    nothing have no rider_uci_results row) or, for a DB stored before those
+    records existed, any result row."""
+    out: set[str] = set()
+    for table in ("rider_uci_scrapes", "rider_uci_results"):
+        try:
+            out.update(r[0] for r in conn.execute(
+                f"SELECT DISTINCT rider_slug FROM {table} WHERE season = ?", (season,)))
+        except sqlite3.OperationalError:  # table missing (DB from before the schema)
+            pass
+    return out
+
+
+def _rows_seen(conn: sqlite3.Connection, season: int) -> int:
+    """Rows the scraped rider pages showed (zero-point rows included): the
+    scrape records' ``rows_seen``, else the rider's stored rows."""
+    seen: dict = {}
+    try:
+        seen.update(conn.execute("SELECT rider_slug, rows_seen FROM rider_uci_scrapes WHERE season = ?",
+                                 (season,)).fetchall())
+    except sqlite3.OperationalError:
+        pass
+    for slug, n in conn.execute("SELECT rider_slug, COUNT(*) FROM rider_uci_results WHERE season = ? "
+                                "GROUP BY rider_slug", (season,)):
+        seen.setdefault(slug, n)
+    return int(sum(seen.values()))
+
+
 def _load_spells(conn: sqlite3.Connection, season: int) -> dict:
     spells = defaultdict(list)
     for slug, team, name, start, end in conn.execute(
@@ -199,11 +237,10 @@ def rider_reconciliation(conn: sqlite3.Connection, season: int) -> list[dict]:
         teams[slug].append(team)
     parts = defaultdict(lambda: {"results": 0.0, "leader": 0.0, "previous_year": 0.0,
                                  "penalties": 0.0, "attributed": 0.0, "all": 0.0})
-    scraped = set()
+    scraped = _scraped_riders(conn, season)
     for slug, day, pts, status in conn.execute(
             "SELECT rider_slug, date, COALESCE(points_uci, 0), COALESCE(status, '') "
             "FROM rider_uci_results WHERE season = ?", (season,)):
-        scraped.add(slug)
         p = parts[slug]
         key = "leader" if status == "leader" else ("previous_year" if day < jan1 else "results")
         p[key] += pts
@@ -345,6 +382,73 @@ def _has_rows(conn, table: str, season: int, slug: str) -> bool:
                         (season, slug)).fetchone() is not None
 
 
+def _with_penalty_race(p: dict, race_rows: list, stored_penalties: list[dict],
+                       match_penalty_race) -> dict:
+    """``p`` with the race it was imposed in (``race_slug`` / ``race_class``).
+
+    Matched against ``race_rows`` (the rows the rider's pages showed now,
+    zero-point rows included).  When they do not hold the race — a degraded
+    scrape keeps only the stored scoring rows, and the sanction was imposed in
+    a race worth 0 to him — the race of the same sanction as stored before
+    (same date; same race name, else same points, else the day's only one) is
+    kept, and so is its race name when the new one is only the 'Sanctions'
+    placeholder of the ranking-page fallback: a stored race is never
+    overwritten with NULL.
+    """
+    if p.get("race_slug") or p.get("race_class"):
+        return p
+    race_slug, race_class = match_penalty_race(p.get("race_name"), p["date"], race_rows)
+    if race_slug is not None or race_class is not None:
+        return {**p, "race_slug": race_slug, "race_class": race_class}
+    day = [s for s in stored_penalties if s["date"] == p["date"] and (s.get("race_slug") or s.get("race_class"))]
+    prev = next((s for s in day if s.get("race_name") == p.get("race_name")), None) or \
+        next((s for s in day if round(s["penalty_points"] or 0, 2) == round(p["penalty_points"] or 0, 2)),
+             None) or (day[0] if len(day) == 1 else None)
+    if prev is None:
+        return {**p, "race_slug": None, "race_class": None}
+    out = {**p, "race_slug": prev.get("race_slug"), "race_class": prev.get("race_class")}
+    if p.get("race_name") in (None, "", "Sanctions") and prev.get("race_name"):
+        out["race_name"] = prev["race_name"]
+    return out
+
+
+def _fines_over_stored(stored: list[dict], fines: list[dict]) -> tuple[list[dict], list[str]]:
+    """Penalties when the world-ranking page failed: the stored ones, day by
+    day, unless the fines page shows at least as much that day.
+
+    The fines page is not the whole truth: PCS lists some sanctions only on
+    the ranking page (stored with the 'Sanctions' placeholder or the day's
+    race; Oct 2026: 13 of the 118 riders with sanctions, e.g. Đurić
+    2026-06-02, Pellizzari 2026-10-13, Unai Ramos's only one), so without the
+    ranking page a stored sanction the fines page omits is kept.  Per date,
+    the fines page's sanctions replace the stored ones when their total is at
+    least the stored total (the same sanctions with their race / fine /
+    article, or one imposed since the last scrape); otherwise the stored ones
+    stay.  A day is never left with fewer points than stored, and the same
+    sanction is never counted twice (stored rows may be several fines-page
+    sanctions summed: replace_rider_penalties merges a day's sanctions in one
+    race, Kuss 25 + 50).  Both pages date a sanction alike: on the Oct 2026
+    DB every fines-page sanction matched a stored one on date and points.
+    Returns (penalties, dates the fines page added points on).
+    """
+    by_day: dict = {}
+    for side, rows in (("stored", stored), ("fines", fines)):
+        for p in rows:
+            by_day.setdefault(p["date"], {"stored": [], "fines": []})[side].append(p)
+    out, added = [], []
+    for day in sorted(by_day):
+        s, f = by_day[day]["stored"], by_day[day]["fines"]
+        s_total = sum(p["penalty_points"] or 0 for p in s)
+        f_total = sum(p["penalty_points"] or 0 for p in f)
+        if f and f_total >= s_total - TOLERANCE:
+            out.extend(f)
+            if f_total > s_total + TOLERANCE:
+                added.append(day)
+        else:
+            out.extend(s)
+    return out, added
+
+
 def store_rider(conn, season: int, slug: str, info: dict, pages: dict, season_start: str,
                 profiles: str, stats: dict, failures: list, race_end_dates: dict | None = None) -> dict:
     """Merge, store and reconcile one rider; returns diagnostics for the report.
@@ -357,12 +461,29 @@ def store_rider(conn, season: int, slug: str, info: dict, pages: dict, season_st
     * results — the world-ranking page failed (no leader-jersey / previous-
       October / ranking-only items) or the results pages were partial;
     * penalties — neither the fines page nor the ranking page's sanctions are
-      available for a rider the breakdown shows sanctions for;
+      available for a rider the breakdown shows sanctions for; or the
+      ranking page failed (it lists sanctions the fines page does not): the
+      stored ones are kept, a day's fines-page sanctions taking their place
+      only when they add up to at least as much (:func:`_fines_over_stored`);
     * spells — the profile was needed (several teams, or points that do not
       reconcile) but could not be fetched.
+
+    "Stored before" means a ``rider_uci_scrapes`` record (or result rows):
+    rider_uci_results holds scoring rows only, so a rider who scored nothing
+    has a record but no row, and his empty stored set is kept just the same.
+    A complete scrape replaces his rows even when it found none (stale
+    points cleared); a degraded one for a rider never stored before is kept
+    but marked incomplete (``complete = 0``).  Each penalty is stored with the
+    race it was imposed in (``race_slug`` / ``race_class``), matched against
+    the full merged rows — zero-point rows included, which are not stored.  On
+    the degraded path those are the partial pages' rows plus the stored
+    scoring rows, and a penalty neither holds keeps the race it was stored
+    with (:func:`_with_penalty_race`).
     """
     from scraper import uci_points as up
-    from db.uci_points import replace_rider_results, replace_rider_penalties, replace_rider_spells
+    from analysis.team_points import match_penalty_race
+    from db.uci_points import (has_rider_scrape, replace_rider_results, replace_rider_penalties,
+                               replace_rider_spells)
 
     diag: dict = {"rider_slug": slug}
     res, wr = pages["res"], pages["wr"]
@@ -381,14 +502,22 @@ def store_rider(conn, season: int, slug: str, info: dict, pages: dict, season_st
         prof = up.fetch_rider_profile_season(slug, season)  # fallback for leader points
         stats["profiles"] += 1
         rows = [r for r in res["rows"] if r["date"] >= season_start] + (prof["leader_rows"] if prof else [])
+    # every row the pages showed this time (zero-point rows included, partial
+    # or not): what a penalty's race is matched against, before anything is
+    # replaced by the stored (scoring-only) rows below
+    page_rows = rows
+    stored_penalties = _stored(conn, "rider_uci_penalties", season, slug)
     degraded = wr is None or not res.get("complete", True)
-    if degraded and _has_rows(conn, "rider_uci_results", season, slug):
+    if degraded and has_rider_scrape(conn, season, slug):
         log.warning("%s: %s — keeping the stored results", slug,
                     "ranking page unavailable" if wr is None else "results pages partial")
         diag["kept_results"] = True
         rows = _stored(conn, "rider_uci_results", season, slug)
     else:
-        replace_rider_results(conn, season, slug, rows)
+        replace_rider_results(conn, season, slug, rows, complete=not degraded, rider_name=name)
+    # the stored rows are scoring rows only: a sanction in a race worth 0 to
+    # him is placed through the pages' own (partial) rows
+    match_rows = page_rows if rows is page_rows else page_rows + rows
     if name:
         conn.execute("UPDATE uci_team_breakdown SET rider_name = ? WHERE season = ? AND rider_slug = ?",
                      (name, season, slug))
@@ -396,7 +525,10 @@ def store_rider(conn, season: int, slug: str, info: dict, pages: dict, season_st
     # penalties: the fines page (race, article) cross-checked with the dated ranking sanctions
     penalties: list | None = []
     wr_sanctions = [x for x in (wr["sanctions"] if wr else []) if (x["date"] or season_start) >= season_start]
-    if info["sanction"] > 0 or wr_sanctions:
+    # without the ranking page the fines page is partial: stored sanctions it
+    # omits are kept (_fines_over_stored), never replaced with fewer or none
+    keep_stored = wr is None and bool(stored_penalties)
+    if info["sanction"] > 0 or wr_sanctions or keep_stored:
         pens = up.fetch_rider_penalties(slug, season)
         stats["penalty_pages"] += 1
         if pens is not None:
@@ -404,11 +536,19 @@ def store_rider(conn, season: int, slug: str, info: dict, pages: dict, season_st
         wr_total = sum(s["points"] for s in wr_sanctions)
         if pens is None:
             failures.append(f"penalties {slug}")
-        if pens and (not wr or abs(sum(p["penalty_points"] for p in pens) - wr_total) <= TOLERANCE):
+        if keep_stored and pens is not None:
+            penalties, added = _fines_over_stored(stored_penalties, pens)
+            diag["kept_penalties"] = True
+            log.warning("%s: ranking page unavailable — keeping the stored penalties%s", slug,
+                        f", fines page adds {added}" if added else "")
+        elif pens and (not wr or abs(sum(p["penalty_points"] for p in pens) - wr_total) <= TOLERANCE):
             penalties = pens
         elif wr_sanctions:
             by_date = {p["date"]: p for p in (pens or [])}
-            races_by_date = {r["date"]: r["race_name"] for r in rows}
+            races_by_date = {r["date"]: r["race_name"] for r in match_rows if r.get("race_name")}
+            races_by_date.update({p["date"]: p["race_name"] for p in stored_penalties
+                                  if p.get("race_name") and p["race_name"] != "Sanctions"
+                                  and p["date"] not in races_by_date})
             penalties = [{"date": s["date"] or jan1,
                           "race_name": (by_date.get(s["date"]) or {}).get("race_name")
                           or races_by_date.get(s["date"]) or "Sanctions",
@@ -426,6 +566,10 @@ def store_rider(conn, season: int, slug: str, info: dict, pages: dict, season_st
         diag["kept_penalties"] = True
         penalties = _stored(conn, "rider_uci_penalties", season, slug)
     else:
+        race_rows = [(r["date"], r.get("race_name"), r.get("race_slug"), r.get("race_class"))
+                     for r in match_rows]
+        penalties = [_with_penalty_race(p, race_rows, stored_penalties, match_penalty_race)
+                     for p in penalties]
         replace_rider_penalties(conn, season, slug, penalties)
 
     # spells: profile team history when the rider moved, or his points do not reconcile
@@ -484,8 +628,52 @@ def _parse_args(argv):
     p.add_argument("--season-start", default=None,
                    help="first day of the UCI season (default: calibrated from the ranking pages)")
     p.add_argument("--report", default=None, help="write the reconciliation report (JSON) here")
+    p.add_argument("--prune-zero", action="store_true", dest="prune_zero",
+                   help="maintenance, no scrape: delete rider_uci_results rows worth no UCI points "
+                        "(stored before the table became scoring-only) for --season")
+    p.add_argument("--all-seasons", action="store_true", dest="all_seasons",
+                   help="with --prune-zero: every season instead of --season")
+    p.add_argument("--vacuum", action="store_true",
+                   help="maintenance, no scrape: VACUUM the database file (after --prune-zero) "
+                        "and print its size before and after")
     p.add_argument("-v", "--verbose", action="store_true")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.all_seasons and not args.prune_zero:
+        p.error("--all-seasons only applies to --prune-zero")
+    return args
+
+
+def _mb(n: int) -> str:
+    return f"{n / 1e6:.1f} MB"
+
+
+def run_maintenance(db_path: str, args) -> int:
+    """--prune-zero / --vacuum: no PCS traffic, no scrape.  Returns 0, or 1 when
+    the database file does not exist (never created by a maintenance run)."""
+    from db.uci_points import prune_zero_point_results, vacuum_database
+    if not os.path.exists(db_path):
+        log.error("no database at %s", db_path)
+        return 1
+    start = os.path.getsize(db_path)
+    print(f"{db_path}: {_mb(start)}")
+    if args.prune_zero:
+        season = None if args.all_seasons else args.season
+        conn = sqlite3.connect(db_path)
+        try:
+            got = prune_zero_point_results(conn, season)
+            conn.commit()
+        finally:
+            conn.close()
+        print(f"prune-zero ({'all seasons' if season is None else season}): "
+              f"{got['deleted']:,} zero-point rows deleted, {got['kept']:,} scoring rows kept; "
+              f"{got['scrapes_backfilled']:,} scrape records backfilled, "
+              f"{got['penalties_resolved']:,} penalties' races resolved")
+        if not args.vacuum:
+            print(f"the freed pages stay in the file until --vacuum (now {_mb(os.path.getsize(db_path))})")
+    if args.vacuum:
+        before, after = vacuum_database(db_path)
+        print(f"vacuum: {_mb(before)} -> {_mb(after)} ({_mb(start - after)} smaller than at start)")
+    return 0
 
 
 def run(argv=None) -> int:
@@ -497,12 +685,14 @@ def run(argv=None) -> int:
     db_path = os.path.abspath(args.db) if args.db else None
     os.chdir(ROOT)  # scraper cache path (cache/html) is relative to the repo root
     import config
+    db_path = db_path or config.DB_PATH
+    if args.prune_zero or args.vacuum:
+        return run_maintenance(db_path, args)
     from scraper import uci_points as up
     from scraper.utils import close_browser
     from db.uci_points import ensure_uci_points_schema, upsert_team_totals, upsert_team_breakdown, \
         upsert_team_recent_points
 
-    db_path = db_path or config.DB_PATH
     season = args.season
     t0 = time.time()
     stats: dict = defaultdict(int)
@@ -638,7 +828,9 @@ def build_report(conn, season, ranking, ranking_date, diags, stats, failures, el
     stats = dict(stats)
     stats.update({
         "riders_scraped": len(scraped),
-        "result_rows": q("SELECT COUNT(*) FROM rider_uci_results WHERE season=?"),
+        # rows the rider pages showed (zero-point included) vs rows stored (scoring only)
+        "result_rows": _rows_seen(conn, season),
+        "stored_rows": q("SELECT COUNT(*) FROM rider_uci_results WHERE season=?"),
         "rows_with_uci_points": q("SELECT COUNT(*) FROM rider_uci_results WHERE season=? AND points_uci > 0"),
         "leader_rows": q("SELECT COUNT(*) FROM rider_uci_results WHERE season=? AND status='leader'"),
         "previous_year_rows": q(f"SELECT COUNT(*) FROM rider_uci_results WHERE season=? "

@@ -279,6 +279,10 @@ def _parse_mapped_table(table, columns: dict[str, int]) -> list[dict]:
     # PCS renders ",," (ditto) when a rider's gap equals the previous row's —
     # the previous rider's gap, NOT the leader's. Carry it forward.
     last_gap = 0
+    # an annulled winner listed above the new one keeps his time, and PCS
+    # still measures every gap from it: see _winner_offset
+    struck_winner = None
+    offset = 0
     body_rows = table.select("tbody tr") or table.select("tr")
     for row in body_rows:
         cells = row.find_all("td", recursive=False)
@@ -298,8 +302,10 @@ def _parse_mapped_table(table, columns: dict[str, int]) -> list[dict]:
         if rider_link is None:
             continue
 
+        if not _rider_slug(rider_link):
+            continue   # empty placeholder row, no rider
         rank_cell = cell("rank") or cells[0]
-        position, status = _parse_position(rank_cell.get_text(strip=True))
+        position, status = _rank_cell_position(rank_cell)
         rec = _blank_row(_rider_slug(rider_link), rider_link.get_text(separator=" ", strip=True),
                          position, status)
 
@@ -315,15 +321,22 @@ def _parse_mapped_table(table, columns: dict[str, int]) -> list[dict]:
         rec["bib"] = _cell_int(cell("bib"))
 
         time_cell = cell("time")
-        if position == 1:
+        if status == "dsq" and _struck_rank(rank_cell) is not None:
+            # annulled result: no time stored, but its gap still feeds the
+            # next row's ",," (and a struck 1st holds the winner's time)
+            if _struck_rank(rank_cell) == 1 and time_cell is not None:
+                struck_winner = parse_time_gap(_gap_text(time_cell))
+            last_gap = _struck_gap(rank_cell, time_cell, last_gap, offset)
+        elif position == 1:
             rec["time_seconds"] = 0
             last_gap = 0
+            offset = _winner_offset(struck_winner, time_cell)
         elif position is not None and time_cell is not None:
             raw_time = _gap_text(time_cell)
             if raw_time in (",,", ""):
                 rec["time_seconds"] = last_gap
             else:
-                rec["time_seconds"] = parse_time_gap(raw_time)
+                rec["time_seconds"] = _minus(parse_time_gap(raw_time), offset)
                 if rec["time_seconds"] is not None:
                     last_gap = rec["time_seconds"]
         results.append(rec)
@@ -378,6 +391,8 @@ def _parse_legacy_table(table) -> list[dict]:
     """
     results = []
     last_gap = 0
+    struck_winner = None   # see _winner_offset
+    offset = 0
     for row in table.select("tr"):
         cells = row.find_all("td")
         if not cells:
@@ -387,26 +402,31 @@ def _parse_legacy_table(table) -> list[dict]:
         if not rider_cell:
             continue
         rider_link = rider_cell.find("a", href=re.compile(r"rider/"))
-        if not rider_link:
+        if not rider_link or not _rider_slug(rider_link):
             continue
 
         # Name stored as "LASTNAME Firstname" on PCS — normalise later
-        position, status = _parse_position(cells[0].get_text(strip=True))
+        position, status = _rank_cell_position(cells[0])
         rec = _blank_row(_rider_slug(rider_link), rider_link.get_text(separator=" ", strip=True),
                          position, status)
 
         # Time gap — inside td.time > font
         # Position 1 = leader, always 0 gap (their cell has absolute time)
         time_cell = row.select_one("td.time")
-        if position == 1:
+        if status == "dsq" and _struck_rank(cells[0]) is not None:
+            if _struck_rank(cells[0]) == 1 and time_cell is not None:
+                struck_winner = parse_time_gap(_gap_text(time_cell))
+            last_gap = _struck_gap(cells[0], time_cell, last_gap, offset)
+        elif position == 1:
             rec["time_seconds"] = 0
             last_gap = 0
+            offset = _winner_offset(struck_winner, time_cell)
         elif position is not None and time_cell:
             raw_time = _gap_text(time_cell) if time_cell.find("font") else ""
             if raw_time == ",," or raw_time == "":
                 rec["time_seconds"] = last_gap
             else:
-                rec["time_seconds"] = parse_time_gap(raw_time)
+                rec["time_seconds"] = _minus(parse_time_gap(raw_time), offset)
                 if rec["time_seconds"] is not None:
                     last_gap = rec["time_seconds"]
 
@@ -432,9 +452,9 @@ def _parse_basic_table(table) -> list[dict]:
         if len(cells) < 2:
             continue
         rider_link = cells[1].find("a", href=re.compile(r"rider/"))
-        if not rider_link:
+        if not rider_link or not _rider_slug(rider_link):
             continue
-        position, status = _parse_position(cells[0].get_text(strip=True))
+        position, status = _rank_cell_position(cells[0])
         rec = _blank_row(_rider_slug(rider_link), rider_link.get_text(separator=" ", strip=True),
                          position, status)
         rec["time_seconds"] = 0 if position == 1 else None
@@ -460,13 +480,20 @@ def _parse_ttt_results(ul) -> list[dict]:
 
     Columns of the rider table: rider (+ own gap to the team time in
     font.blue), PCS points, UCI points (the team's share, often fractional).
+    A rider who did not finish carries a status marker in a red font before
+    his name — ``<a href="rider/mauro-schmid"><font class="red">DNS</font>
+    SCHMID Mauro</a>``, ``<font class="red">OTL</font> PADUN Mark
+    <font class="blue">+8:53</font>`` — and is stored as that status with no
+    position and no time (as on any other stage); the pre-Oct-2026 parser
+    ranked him as a finisher at the team's time (Paris-Nice 2023 stage 3).
 
     Output is one row per rider, ranked individually by team time + own gap
     (ties keep team order), so the stage keeps per-rider positions and
     ``time_seconds`` like any other stage.  A team without a parsable time
-    sorts after all timed teams.
+    sorts after all timed teams; non-finishers follow, unranked.
     """
     entries = []
+    out_of_race = []
     for team_rank, li in enumerate(ul.find_all("li", recursive=False)):
         team_link = li.find("a", href=re.compile(r"^/?team/"))
         rider_rows = li.select("table tr")
@@ -478,18 +505,30 @@ def _parse_ttt_results(ul) -> list[dict]:
         for order, tr in enumerate(rider_rows):
             tds = tr.find_all("td")
             link = tr.find("a", href=re.compile(r"^/?rider/"))
-            if link is None:
+            if link is None or not _rider_slug(link):
                 continue
-            gap_el = link.find("font")
+            status = "finished"
+            for font in link.find_all("font"):
+                if "red" in (font.get("class") or []):
+                    _, marker = _parse_position(font.get_text(strip=True))
+                    if marker != "unknown":
+                        status = marker
+            gap_el = link.find("font", class_="blue")
+            if gap_el is None:  # older markup: an unclassed gap font
+                gap_el = next((f for f in link.find_all("font") if not f.get("class")), None)
             gap = parse_time_gap(gap_el.get_text(strip=True)) if gap_el else 0
             name_parts = [t.strip() for t in link.find_all(string=True, recursive=False) if t.strip()]
             rec = _blank_row(_rider_slug(link), " ".join(name_parts) or link.get_text(" ", strip=True),
-                             None, "finished")
+                             None, status)
             rec["team_slug"], rec["team_name"] = team_slug, team_name
+            rec["team_time_trial"] = True   # the page was a TTT (main.py fixes a stored profile)
             if len(tds) > 1:
                 rec["points_pcs"], _ = _parse_points(tds[1])
             if len(tds) > 2:
                 rec["points_uci"], rec["uci_penalty"] = _parse_points(tds[2])
+            if status != "finished":
+                out_of_race.append(rec)
+                continue
             abs_time = None if team_time is None else team_time + (gap or 0)
             entries.append((abs_time is None, abs_time or 0, team_rank, order, rec))
 
@@ -501,7 +540,7 @@ def _parse_ttt_results(ul) -> list[dict]:
         rec["position"] = pos
         rec["time_seconds"] = None if untimed or best is None else int(round(abs_time - best))
         results.append(rec)
-    return results
+    return results + out_of_race
 
 
 def _ttt_time_seconds(raw: str) -> float | None:
@@ -518,7 +557,13 @@ def _ttt_time_seconds(raw: str) -> float | None:
 
 
 def _rider_slug(link) -> str:
-    return link["href"].strip("/").split("rider/", 1)[-1].split("?")[0].strip("/")
+    """'rider/tom-pidcock' -> 'tom-pidcock'; '' for PCS's empty placeholder
+    link ``<a href="rider/"></a>`` (a nameless DNF row, San Juan 2023 stage 4),
+    which earlier parses stored as a rider called 'rider'."""
+    href = link.get("href", "").strip().strip("/")
+    if "rider/" not in href:
+        return ""
+    return href.split("rider/", 1)[-1].split("?")[0].strip("/")
 
 
 def _team_from_link(link) -> tuple[str | None, str | None]:
@@ -540,6 +585,75 @@ def _parse_position(raw: str):
         return int(re.sub(r"[^\d]", "", raw)), "finished"
     except Exception:
         return None, "unknown"
+
+
+def _struck_rank(cell):
+    """The struck-through rank of an annulled result, else None.
+
+    PCS keeps an annulled result (a later disqualification, e.g. Miguel Ángel
+    López's San Juan 2023 stage win) in the list with its rank struck through:
+    ``<td class=""><s>&nbsp;1&nbsp;</s></td>``; the rider after him is ranked
+    in his place.  Returns the struck number (int) or None.
+    """
+    if cell is None:
+        return None
+    s = cell.find(["s", "strike", "del"])
+    if s is None:
+        return None
+    digits = re.sub(r"[^\d]", "", s.get_text(strip=True))
+    return int(digits) if digits else None
+
+
+def _rank_cell_position(cell) -> tuple:
+    """(position, status) of a rank cell; a struck-through rank (annulled
+    result, :func:`_struck_rank`) is ``(None, 'dsq')`` — the pre-Oct-2026
+    parser stored it as a finish (two 1st places on San Juan 2023 stage 5)."""
+    if _struck_rank(cell) is not None:
+        return None, "dsq"
+    return _parse_position(cell.get_text(strip=True))
+
+
+def _struck_gap(rank_cell, time_cell, last_gap, offset: int = 0):
+    """Running gap after an annulled row: its own gap if it shows one (a
+    struck 1st shows the winner's absolute time → 0), else unchanged.
+    ``offset``: see :func:`_winner_offset`."""
+    if _struck_rank(rank_cell) == 1:
+        return 0
+    if time_cell is None or (time_cell.name == "td" and not time_cell.get_text(strip=True)):
+        return last_gap
+    raw = _gap_text(time_cell)
+    if raw in (",,", ""):
+        return last_gap
+    gap = _minus(parse_time_gap(raw), offset)
+    return last_gap if gap is None else gap
+
+
+def _winner_offset(struck_winner, time_cell) -> int:
+    """Seconds between an annulled winner and the rider ranked 1st after him.
+
+    When the struck row is the original winner (San Juan 2023 stage 5: López
+    struck at 4:07:10, Ganna ranked 1st at 4:07:40), PCS still prints every
+    gap below from the annulled time: Higuita's "0:38" is 8 s behind Ganna.
+    The new winner's cell shows his absolute time (an offset of 30 s), a gap
+    to the struck winner, or ",," (same time, Tour de Normandie Féminin 2023
+    stage 3: no offset).  A gap can never reach the stage's whole time, so a
+    value at least the struck winner's is absolute.  0 without a struck
+    winner above.
+    """
+    if struck_winner is None or time_cell is None:
+        return 0
+    raw = _gap_text(time_cell)
+    own = parse_time_gap(raw) if raw not in (",,", "") else None
+    if own is None:
+        return 0
+    return max(own - struck_winner, 0) if own >= struck_winner else own
+
+
+def _minus(gap, offset: int):
+    """A printed gap re-measured from the ranked winner (never below 0)."""
+    if gap is None or not offset:
+        return gap
+    return max(gap - offset, 0)
 
 
 def _number(text: str):

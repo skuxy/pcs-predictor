@@ -5,8 +5,9 @@
         --db /path/to/copy.db --out-json /tmp/team_points.json --out-html /tmp/team_points.html
 
 Reads the team-UCI-points tables written by scripts/scrape_uci_points.py
-(``uci_team_totals``, ``uci_team_breakdown``, ``rider_uci_results``,
-``rider_uci_penalties``, ``rider_team_spells``) from ``--db`` (default
+(``uci_team_totals``, ``uci_team_breakdown``, ``rider_uci_results`` — scoring
+rows only —, ``rider_uci_scrapes``, ``rider_uci_penalties``,
+``rider_team_spells``) from ``--db`` (default
 ``config.DB_PATH``), opened READ-ONLY, and builds the payload with
 ``analysis.team_points.build_chart_payload``.  ``--rider SLUG`` (repeatable,
 default ``tadej-pogacar``) adds a single rider's own series to compare with

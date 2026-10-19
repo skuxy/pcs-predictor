@@ -558,20 +558,221 @@ def test_storage_is_idempotent(tmp_path):
         conn.commit()
         assert _count(conn, "uci_team_totals") == 2
         assert _count(conn, "uci_team_breakdown") == 3
-        assert _count(conn, "rider_uci_results") == len(rows) == 12
+        # 12 rows on the pages, 8 worth points: only those are stored
+        assert len(rows) == 12 and _count(conn, "rider_uci_results") == 8
+        assert _count(conn, "rider_uci_scrapes") == 1
         assert _count(conn, "rider_uci_penalties") == 1
         assert _count(conn, "rider_team_spells") == 1
         assert _count(conn, "uci_team_recent_points") == 2
+    assert conn.execute("SELECT COUNT(*) FROM rider_uci_results WHERE points_uci IS NULL "
+                        "OR points_uci = 0").fetchone()[0] == 0
+    assert conn.execute("SELECT rows_seen, scoring_rows, first_date, last_date, complete "
+                        "FROM rider_uci_scrapes").fetchone() == (12, 8, "2025-10-25", "2026-08-29", None)
     pts = conn.execute("SELECT points_uci FROM rider_uci_results WHERE result_kind = 'gc'").fetchone()[0]
     assert pts == 1300.0
-    # a refreshed rider replaces his old rows; an empty result set deletes nothing
+    # a refreshed rider replaces his old rows (DNF, NR, KOM 2nd: one scores);
+    # an empty result set is "nothing scraped" and deletes nothing
     replace_rider_results(conn, 2026, "tadej-pogacar", rows[:3])
-    assert _count(conn, "rider_uci_results") == 3
+    assert _count(conn, "rider_uci_results") == 1
     replace_rider_results(conn, 2026, "tadej-pogacar", [])
-    assert _count(conn, "rider_uci_results") == 3
+    assert _count(conn, "rider_uci_results") == 1
+    assert conn.execute("SELECT rows_seen, last_date FROM rider_uci_scrapes").fetchone() == (3, "2026-08-29")
     # a team page that lost a rider drops him
     upsert_team_breakdown(conn, "uae-team-emirates-xrg-2026", "UAE", "WT", breakdown[:1])
     assert _count(conn, "uci_team_breakdown") == 1
+
+
+def _zero(day, url, status="finished"):
+    return {**_ROW, "date": day, "race_name": "Z", "points_uci": None, "status": status, "result_url": url}
+
+
+def test_replace_scored_nothing_vs_nothing_scraped(tmp_path):
+    conn = sqlite3.connect(tmp_path / "e.db")
+    ensure_uci_points_schema(conn)
+    old = [{**_ROW, "date": "2026-03-01", "race_name": "A", "points_uci": 40.0, "result_url": "a"}]
+
+    def stored(slug):
+        return conn.execute("SELECT COUNT(*) FROM rider_uci_results WHERE rider_slug = ?", (slug,)).fetchone()[0]
+
+    def scrape(slug):
+        return conn.execute("SELECT rows_seen, scoring_rows, last_date, complete FROM rider_uci_scrapes "
+                            "WHERE rider_slug = ?", (slug,)).fetchone()
+    for slug in ("a", "b", "c", "d"):
+        replace_rider_results(conn, 2026, slug, old, complete=True)
+    # scraped fine, every row worth 0 (PCS re-attributed the points): stale points cleared
+    assert replace_rider_results(conn, 2026, "a", [_zero("2026-03-01", "a"), _zero("2026-05-02", "z")],
+                                 complete=True) == 0
+    assert stored("a") == 0 and scrape("a") == (2, 0, "2026-05-02", 1)
+    # scraped fine, no season row at all (his one result was annulled): cleared too
+    assert replace_rider_results(conn, 2026, "b", [], complete=True, rider_name="B") == 0
+    assert stored("b") == 0 and scrape("b") == (0, 0, None, 1)
+    assert conn.execute("SELECT rider_name FROM rider_uci_scrapes WHERE rider_slug = 'b'").fetchone() == ("B",)
+    # nothing scraped (page failed: no rows, not complete): stored rows and record untouched
+    for complete in (None, False):
+        assert replace_rider_results(conn, 2026, "c", [], complete=complete) == 0
+        assert stored("c") == 1 and scrape("c") == (1, 1, "2026-03-01", 1)
+    # a partial scrape still replaces, but its record says so
+    replace_rider_results(conn, 2026, "d", [_zero("2026-06-01", "z")], complete=False)
+    assert stored("d") == 0 and scrape("d") == (1, 0, "2026-06-01", 0)
+    # zero / NULL points never stored; negative and leader rows are
+    replace_rider_results(conn, 2026, "e", [
+        _zero("2026-03-01", "n"), {**_zero("2026-03-02", "z0"), "points_uci": 0.0},
+        {**_zero("2026-03-03", "neg"), "points_uci": -5.0},
+        {**_zero("2026-03-04", "lead", "leader"), "points_uci": 25.0, "result_kind": "other"}], complete=True)
+    assert conn.execute("SELECT result_url FROM rider_uci_results WHERE rider_slug = 'e' ORDER BY date"
+                        ).fetchall() == [("neg",), ("lead",)]
+
+
+def test_store_rider_complete_scrape_with_no_points_clears_stale_rows(tmp_path, monkeypatch):
+    conn = _store_db(tmp_path)
+    replace_rider_results(conn, 2026, "r", [
+        {**_ROW, "date": "2026-03-01", "race_name": "A", "points_uci": 100.0, "result_url": "a"}])
+    monkeypatch.setattr(up, "fetch_rider_penalties", lambda slug, season: [])
+    info = {"name": "R", "official": 0.0, "sanction": 0.0, "teams": [{"team_slug": "t-2026", "team_name": "T"}]}
+    # PCS moved the result: the rider's page now shows the race worth 0 points
+    pages = {"res": {"rider_name": "R", "rows": [_zero("2026-03-01", "a")], "complete": True},
+             "wr": {"total": 0.0, "items": [], "sanctions": [], "races": []}}
+    diag = cli.store_rider(conn, 2026, "r", info, pages, "2025-10-22", "none", defaultdict(int), [], {})
+    assert "kept_results" not in diag and diag["ledger"] == 0.0
+    assert _count(conn, "rider_uci_results") == 0
+    assert conn.execute("SELECT rows_seen, complete FROM rider_uci_scrapes").fetchone() == (1, 1)
+    # a later run whose ranking page fails keeps that (empty) stored season
+    pages = {"res": {"rider_name": "R", "rows": [{**_zero("2026-03-01", "a"), "points_uci": 80.0}],
+                     "complete": True}, "wr": None}
+    monkeypatch.setattr(up, "fetch_rider_profile_season", lambda slug, season: None)
+    diag = cli.store_rider(conn, 2026, "r", info, pages, "2025-10-22", "none", defaultdict(int), [], {})
+    assert diag["kept_results"] and _count(conn, "rider_uci_results") == 0
+    # a rider never stored whose ranking page fails: rows kept, record marked partial
+    diag = cli.store_rider(conn, 2026, "new", info, pages, "2025-10-22", "none", defaultdict(int), [], {})
+    assert "kept_results" not in diag
+    assert conn.execute("SELECT scoring_rows, complete FROM rider_uci_scrapes WHERE rider_slug = 'new'"
+                        ).fetchone() == (1, 0)
+
+
+def test_store_rider_resolves_penalty_race_from_zero_point_rows(tmp_path, monkeypatch):
+    # Unai Ramos: 0 points, a 10-point sanction in a race he scored nothing in.
+    # The race comes from his zero-point row, which is not stored.
+    conn = _store_db(tmp_path)
+    monkeypatch.setattr(up, "fetch_rider_penalties", lambda slug, season: [
+        {"date": "2026-04-16", "race_name": "Vuelta a Castilla y León | Stage 2", "penalty_points": 10.0,
+         "fine": "200", "article": "x"}])
+    rows = [{**_zero("2026-04-16", "race/castilla-y-leon-2026-stage-2"), "race_name": "Vuelta a Castilla y León",
+             "race_slug": "race/castilla-y-leon/2026", "race_class": "2.1", "result_label": "Stage 2",
+             "result_kind": "stage", "rider_name": "Unai Ramos"}]
+    info = {"name": "U", "official": 0.0, "sanction": 10.0, "teams": [{"team_slug": "k-2026", "team_name": "K"}]}
+    pages = {"res": {"rider_name": "Unai Ramos", "rows": rows, "complete": True},
+             "wr": {"total": 0.0, "items": [], "sanctions": [{"date": "2026-04-16", "points": 10.0}],
+                    "races": []}}
+    cli.store_rider(conn, 2026, "unai-ramos", info, pages, "2025-10-22", "none", defaultdict(int), [], {})
+    assert _count(conn, "rider_uci_results") == 0
+    assert conn.execute("SELECT race_slug, race_class, penalty_points FROM rider_uci_penalties").fetchall() == [
+        ("race/castilla-y-leon/2026", "2.1", 10.0)]
+    assert conn.execute("SELECT rider_name FROM rider_uci_scrapes").fetchone() == ("Unai Ramos",)
+    # still a scraped rider for the reconciliation report, although he has no row
+    upsert_team_breakdown(conn, "k-2026", "K", "PRT", [
+        {"season": 2026, "rider_slug": "unai-ramos", "rider_name": "RAMOS Unai", "nth_best": 30,
+         "points_counted": None, "points_not_counted": None, "sanction_points": 10.0}])
+    rec = cli.rider_reconciliation(conn, 2026)[0]
+    assert rec["scraped"] and rec["penalties"] == 10.0 and rec["diff"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# --prune-zero / --vacuum (maintenance on a DB stored before scoring-only)
+# ---------------------------------------------------------------------------
+
+def _legacy_db(path):
+    """A DB as the old scraper left it: zero-point rows stored, no scrape
+    records, penalties without their race."""
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+        CREATE TABLE rider_uci_results (
+            season INTEGER NOT NULL, rider_slug TEXT NOT NULL, rider_name TEXT,
+            date TEXT NOT NULL, race_name TEXT, race_slug TEXT, result_label TEXT,
+            result_kind TEXT NOT NULL, race_class TEXT, position INTEGER, status TEXT,
+            points_uci REAL, points_pcs REAL, result_url TEXT NOT NULL,
+            fetched_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(season, rider_slug, date, result_url, result_label));
+        CREATE TABLE rider_uci_penalties (
+            season INTEGER NOT NULL, rider_slug TEXT NOT NULL, date TEXT NOT NULL, race_name TEXT,
+            penalty_points REAL NOT NULL, fine TEXT, article TEXT,
+            UNIQUE(season, rider_slug, date, race_name));""")
+    rows = []
+    for season in (2025, 2026):
+        for i in range(30):
+            pts = 10.0 if i % 5 == 0 else (0.0 if i % 7 == 0 else None)
+            rows.append((season, "r", "Rider R", f"{season}-05-{i + 1:02d}", "Race A", f"race/a/{season}",
+                         f"Stage {i}", "stage", "2.1", i + 1, "finished", pts, f"u{i}"))
+        rows.append((season, "zero", "Zero Z", f"{season}-06-01", "Race B", f"race/b/{season}", "",
+                     "oneday", "1.1", 50, "finished", None, "b"))
+    conn.executemany("INSERT INTO rider_uci_results (season, rider_slug, rider_name, date, race_name, race_slug, "
+                     "result_label, result_kind, race_class, position, status, points_uci, result_url) "
+                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    # the day before his only (zero-point) race day: nearest row of that race
+    conn.execute("INSERT INTO rider_uci_penalties VALUES (2026, 'zero', '2026-05-31', 'Race B ME', 10, '', '')")
+    conn.commit()
+    conn.close()
+
+
+def test_prune_zero_keeps_what_the_zero_rows_were_needed_for(tmp_path):
+    from db.uci_points import prune_zero_point_results
+    db = tmp_path / "legacy.db"
+    _legacy_db(db)
+    conn = sqlite3.connect(db)
+    got = prune_zero_point_results(conn, 2026)
+    conn.commit()
+    # 2026: 6 scoring rows of 31 (rider r: i % 5 == 0); 2025 untouched
+    assert got == {"deleted": 25, "kept": 6, "scrapes_backfilled": 2, "penalties_resolved": 1}
+    assert conn.execute("SELECT season, COUNT(*) FROM rider_uci_results GROUP BY season").fetchall() == [
+        (2025, 31), (2026, 6)]
+    assert conn.execute("SELECT rider_slug, rider_name, rows_seen, scoring_rows, first_date, last_date, complete "
+                        "FROM rider_uci_scrapes ORDER BY rider_slug").fetchall() == [
+        ("r", "Rider R", 30, 6, "2026-05-01", "2026-05-30", None),
+        ("zero", "Zero Z", 1, 0, "2026-06-01", "2026-06-01", None)]
+    assert conn.execute("SELECT race_slug, race_class FROM rider_uci_penalties").fetchone() == (
+        "race/b/2026", "1.1")
+    # idempotent
+    assert prune_zero_point_results(conn, 2026) == {"deleted": 0, "kept": 6, "scrapes_backfilled": 0,
+                                                    "penalties_resolved": 0}
+    # every season
+    assert prune_zero_point_results(conn)["deleted"] == 25
+    assert conn.execute("SELECT COUNT(*) FROM rider_uci_results").fetchone()[0] == 12
+    assert _count(conn, "rider_uci_scrapes") == 4
+    # the readers: data_through still reaches the last row seen, the zero rider is still "scraped"
+    from analysis.team_points import data_through
+    assert data_through(conn, 2026) == "2026-06-01"
+    assert cli._scraped_riders(conn, 2026) == {"r", "zero"}
+    assert cli._rows_seen(conn, 2026) == 31
+
+
+def test_cli_prune_zero_and_vacuum(tmp_path, capsys):
+    db = tmp_path / "legacy.db"
+    _legacy_db(db)
+    conn = sqlite3.connect(db)  # pad the file so VACUUM has pages to give back
+    conn.execute("CREATE TABLE pad (x TEXT)")
+    conn.executemany("INSERT INTO pad VALUES (?)", [("x" * 2000,) for _ in range(500)])
+    conn.commit()
+    conn.execute("DELETE FROM pad")
+    conn.commit()
+    conn.close()
+    assert cli.run(["--db", str(db), "--prune-zero", "--season", "2026"]) == 0
+    out = capsys.readouterr().out
+    assert "25 zero-point rows deleted, 6 scoring rows kept" in out and "--vacuum" in out
+    size = db.stat().st_size  # deleting frees pages inside the file only
+    assert size > 1_000_000
+    assert cli.run(["--db", str(db), "--prune-zero", "--all-seasons", "--vacuum"]) == 0
+    out = capsys.readouterr().out
+    assert "prune-zero (all seasons): 25 zero-point rows deleted" in out and "vacuum:" in out
+    assert db.stat().st_size < size / 2
+    conn = sqlite3.connect(db)
+    assert conn.execute("SELECT COUNT(*) FROM rider_uci_results").fetchone()[0] == 12
+    assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    conn.close()
+    # vacuum alone is a no-op on a compact file; a missing DB is an error, never created
+    assert cli.run(["--db", str(db), "--vacuum"]) == 0
+    assert cli.run(["--db", str(tmp_path / "none.db"), "--vacuum"]) == 1
+    assert not (tmp_path / "none.db").exists()
+    with pytest.raises(SystemExit):
+        cli.run(["--db", str(db), "--all-seasons"])
 
 
 # ---------------------------------------------------------------------------
@@ -732,6 +933,170 @@ def test_store_rider_keeps_stored_rows_when_pages_fail(tmp_path, monkeypatch):
     assert conn.execute("SELECT team_slug, start_date, end_date FROM rider_team_spells ORDER BY team_slug"
                         ).fetchall() == [("t1-2026", None, "2026-06-30"), ("t2-2026", "2026-07-01", None)]
     assert "penalties r" in failures and "profile r" in failures
+
+
+def _zingle_db(tmp_path):
+    """Axel Zingle as stored by a complete scrape: one scoring row (Paris-Nice)
+    and a 100-point sanction from E3, a race worth 0 to him (row not stored)."""
+    conn = _store_db(tmp_path)
+    replace_rider_results(conn, 2026, "axel-zingle", [
+        {**_ROW, "date": "2026-03-10", "race_name": "Paris-Nice", "race_slug": "race/paris-nice/2026",
+         "race_class": "2.UWT", "points_uci": 60.0, "result_url": "race/paris-nice-2026-stage-3"}],
+        complete=True)
+    replace_rider_penalties(conn, 2026, "axel-zingle", [
+        {"date": "2026-03-27", "race_name": "E3 Saxo Classic ME", "penalty_points": 100.0,
+         "race_slug": "race/e3-harelbeke/2026", "race_class": "1.UWT"}])
+    return conn
+
+
+def _zingle_pages(complete: bool, wr: bool = True):
+    # a partial results page set: Paris-Nice only, E3 (0 points) on the page that failed
+    rows = [{**_ROW, "date": "2026-03-10", "race_name": "Paris-Nice", "race_slug": "race/paris-nice/2026",
+             "race_class": "2.UWT", "points_uci": 60.0, "result_url": "race/paris-nice-2026-stage-3"}]
+    return {"res": {"rider_name": "Axel Zingle", "rows": rows, "complete": complete},
+            "wr": {"total": 60.0, "items": [], "sanctions": [{"date": "2026-03-27", "points": 100.0}],
+                   "races": []} if wr else None}
+
+
+_ZINGLE = {"name": "ZINGLE Axel", "official": -40.0, "sanction": 100.0,
+           "teams": [{"team_slug": "visma-2026", "team_name": "Visma"}]}
+
+
+def _penalty_rows(conn):
+    return conn.execute("SELECT date, race_name, penalty_points, race_slug, race_class "
+                        "FROM rider_uci_penalties").fetchall()
+
+
+def test_store_rider_degraded_keeps_the_penalty_race(tmp_path, monkeypatch):
+    # results pages partial: the stored (scoring-only) rows are kept and the
+    # E3 row the sanction was placed with is on neither side — the race the
+    # penalty was stored with must survive, not be overwritten with NULL
+    conn = _zingle_db(tmp_path)
+    monkeypatch.setattr(up, "fetch_rider_penalties", lambda slug, season: [
+        {"date": "2026-03-27", "race_name": "E3 Saxo Classic ME", "penalty_points": 100.0,
+         "fine": "", "article": "2.12.007"}])
+    diag = cli.store_rider(conn, 2026, "axel-zingle", _ZINGLE, _zingle_pages(complete=False), "2025-10-22",
+                           "none", defaultdict(int), [], {})
+    assert diag["kept_results"] and "kept_penalties" not in diag
+    assert _penalty_rows(conn) == [
+        ("2026-03-27", "E3 Saxo Classic ME", 100.0, "race/e3-harelbeke/2026", "1.UWT")]
+
+
+def test_store_rider_degraded_ranking_fallback_keeps_race_name(tmp_path, monkeypatch):
+    # fines page down too: the sanction comes from the ranking page; its race
+    # name is the stored one, not the 'Sanctions' placeholder
+    conn = _zingle_db(tmp_path)
+    monkeypatch.setattr(up, "fetch_rider_penalties", lambda slug, season: None)
+    cli.store_rider(conn, 2026, "axel-zingle", _ZINGLE, _zingle_pages(complete=False), "2025-10-22",
+                    "none", defaultdict(int), [], {})
+    assert _penalty_rows(conn) == [
+        ("2026-03-27", "E3 Saxo Classic ME", 100.0, "race/e3-harelbeke/2026", "1.UWT")]
+
+
+def _duric_db(tmp_path):
+    """Đorđe Đurić as stored by a complete scrape: two 25-point sanctions, one
+    listed only on the ranking page ('Sanctions'), one on the fines page too."""
+    conn = _store_db(tmp_path)
+    replace_rider_results(conn, 2026, "dorde-duric", [
+        {**_ROW, "date": "2026-05-01", "race_name": "A", "points_uci": 91.0, "result_url": "a"}], complete=True)
+    replace_rider_penalties(conn, 2026, "dorde-duric", [
+        {"date": "2026-06-02", "race_name": "Sanctions", "penalty_points": 25.0},
+        {"date": "2026-09-16", "race_name": "Tour of Taihu Lake | Stage 5", "penalty_points": 25.0,
+         "fine": "CHF 200", "article": "2.12.007", "race_slug": "race/tour-of-taihu-lake/2026", "race_class": "2.1"}])
+    return conn
+
+
+_DURIC = {"name": "ĐURIĆ Đorđe", "official": 41.0, "sanction": 50.0,
+          "teams": [{"team_slug": "t-2026", "team_name": "T"}]}
+_TAIHU = {"date": "2026-09-16", "race_name": "Tour of Taihu Lake | Stage 5", "penalty_points": 25.0,
+          "fine": "CHF 200", "article": "2.12.007"}
+
+
+def _no_ranking(conn):
+    rows = conn.execute("SELECT date, race_name, points_uci FROM rider_uci_results").fetchall()
+    return {"res": {"rider_name": "Đorđe Đurić", "complete": True, "rows": [
+        {**_ROW, "date": d, "race_name": n, "points_uci": p, "result_url": n.lower()} for d, n, p in rows]},
+        "wr": None}
+
+
+@pytest.mark.parametrize("fines", [[_TAIHU], []], ids=["fines-page-subset", "fines-page-empty"])
+def test_store_rider_without_ranking_keeps_ranking_only_sanctions(tmp_path, monkeypatch, fines):
+    # ranking page down: the fines page does not list the 2026-06-02 sanction
+    # (PCS shows it on the ranking page only) — it must not be deleted
+    conn = _duric_db(tmp_path)
+    before = _penalty_rows(conn)
+    monkeypatch.setattr(up, "fetch_rider_penalties", lambda slug, season: [dict(p) for p in fines])
+    monkeypatch.setattr(up, "fetch_rider_profile_season", lambda slug, season: None)
+    diag = cli.store_rider(conn, 2026, "dorde-duric", _DURIC, _no_ranking(conn), "2025-10-22", "none",
+                           defaultdict(int), [], {})
+    assert diag["kept_results"] and diag["kept_penalties"]
+    assert _penalty_rows(conn) == before
+    assert diag["ledger"] == diag["official"] == 41.0
+
+
+def test_store_rider_without_ranking_keeps_a_riders_only_sanction(tmp_path, monkeypatch):
+    # Unai Ramos: his only sanction is on the ranking page; the breakdown's
+    # sanction column says nothing either way on this run
+    conn = _store_db(tmp_path)
+    replace_rider_results(conn, 2026, "unai-ramos", [], complete=True, rider_name="Unai Ramos")
+    replace_rider_penalties(conn, 2026, "unai-ramos", [
+        {"date": "2026-06-02", "race_name": "Sanctions", "penalty_points": 10.0}])
+    pages_read = []
+    monkeypatch.setattr(up, "fetch_rider_penalties", lambda slug, season: pages_read.append(slug) or [])
+    monkeypatch.setattr(up, "fetch_rider_profile_season", lambda slug, season: None)
+    for sanction in (10.0, 0.0):
+        diag = cli.store_rider(conn, 2026, "unai-ramos", {**_DURIC, "official": 0.0, "sanction": sanction},
+                               {"res": {"rider_name": "Unai Ramos", "rows": [], "complete": True}, "wr": None},
+                               "2025-10-22", "none", defaultdict(int), [], {})
+        assert diag["kept_penalties"] and diag["ledger"] == -10.0
+        assert conn.execute("SELECT date, race_name, penalty_points FROM rider_uci_penalties").fetchall() == [
+            ("2026-06-02", "Sanctions", 10.0)]
+    assert pages_read == ["unai-ramos", "unai-ramos"]
+
+
+def test_fines_over_stored_per_day():
+    stored = [{"date": "2026-06-02", "race_name": "Sanctions", "penalty_points": 25.0},
+              {"date": "2026-07-25", "race_name": "Tour de France | Stage 20", "penalty_points": 75.0,
+               "race_slug": "race/tour-de-france/2026", "race_class": "2.UWT"},
+              {"date": "2026-09-16", "race_name": "Sanctions", "penalty_points": 25.0}]
+    fines = [  # Kuss: the stored 75 is these two summed (one row per day and race)
+        {"date": "2026-07-25", "race_name": "Tour de France | Stage 20", "penalty_points": 25.0},
+        {"date": "2026-07-25", "race_name": "Tour de France | Stage 20", "penalty_points": 50.0},
+        # the placeholder's race, fine and article
+        {"date": "2026-09-16", "race_name": "Tour of Taihu Lake | Stage 5", "penalty_points": 25.0,
+         "fine": "CHF 200"},
+        # imposed since the last scrape
+        {"date": "2026-10-13", "race_name": "Il Lombardia", "penalty_points": 15.0}]
+    out, added = cli._fines_over_stored(stored, fines)
+    assert [(p["date"], p["race_name"], p["penalty_points"]) for p in out] == [
+        ("2026-06-02", "Sanctions", 25.0),                          # ranking-only: kept
+        ("2026-07-25", "Tour de France | Stage 20", 25.0),
+        ("2026-07-25", "Tour de France | Stage 20", 50.0),           # same total: fines rows, not twice
+        ("2026-09-16", "Tour of Taihu Lake | Stage 5", 25.0),
+        ("2026-10-13", "Il Lombardia", 15.0)]
+    assert added == ["2026-10-13"]
+    assert sum(p["penalty_points"] for p in out) == 140.0
+    # a day the fines page shows less for keeps the stored rows
+    out, added = cli._fines_over_stored(stored[1:2], fines[:1])
+    assert out == stored[1:2] and added == []
+
+
+def test_store_rider_degraded_matches_partial_pages_zero_rows(tmp_path, monkeypatch):
+    # the partial pages did hold the race (a zero-point row): matched from it
+    conn = _store_db(tmp_path)
+    replace_rider_results(conn, 2026, "r", [
+        {**_ROW, "date": "2026-03-10", "race_name": "A", "points_uci": 60.0, "result_url": "a"}], complete=True)
+    monkeypatch.setattr(up, "fetch_rider_penalties", lambda slug, season: [
+        {"date": "2026-04-16", "race_name": "Vuelta a Castilla y León | Stage 2", "penalty_points": 10.0}])
+    rows = [{**_zero("2026-04-16", "race/castilla-y-leon-2026-stage-2"), "race_name": "Vuelta a Castilla y León",
+             "race_slug": "race/castilla-y-leon/2026", "race_class": "2.1", "result_kind": "stage"}]
+    pages = {"res": {"rider_name": "R", "rows": rows, "complete": False},
+             "wr": {"total": 0.0, "items": [], "sanctions": [{"date": "2026-04-16", "points": 10.0}], "races": []}}
+    diag = cli.store_rider(conn, 2026, "r", {**_ZINGLE, "sanction": 10.0}, pages, "2025-10-22", "none",
+                           defaultdict(int), [], {})
+    assert diag["kept_results"] and _count(conn, "rider_uci_results") == 1
+    assert _penalty_rows(conn) == [
+        ("2026-04-16", "Vuelta a Castilla y León | Stage 2", 10.0, "race/castilla-y-leon/2026", "2.1")]
 
 
 def test_store_rider_previous_october_points_stay_with_franchise(tmp_path, monkeypatch):

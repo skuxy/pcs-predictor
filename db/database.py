@@ -62,6 +62,11 @@ def init_db(db_path: str = DB_PATH) -> None:
         from db.uci_points import ensure_uci_points_schema
         ensure_uci_points_schema(conn)
 
+        # Aliases of riders PCS re-slugged (thomas-pidcock -> tom-pidcock),
+        # written by `main.py merge-riders`, read by every scrape path.
+        from db.rider_merge import ensure_rider_merge_schema
+        ensure_rider_merge_schema(conn)
+
 
 @contextmanager
 def get_conn(db_path: str = DB_PATH):
@@ -105,6 +110,18 @@ def upsert_rider(conn: sqlite3.Connection, data: dict) -> int:
 
 
 def upsert_race(conn: sqlite3.Connection, data: dict) -> int:
+    """Insert or update a race keyed by pcs_slug.
+
+    ``gender`` is set on insert only (a stored NULL is filled).  The value
+    a scrape passes is the calendar row's guess (scraper.races._detect_gender),
+    and the men's calendar circuits list women's races with no marker in the
+    name (Tour El Salvador, Elsy Jacobs, GP Oetingen).  The stored value may
+    have been corrected from the race's own page ("Race category: WE",
+    main._sync_race_gender / ``race-gender``), and ``scrape`` skips stages
+    that already have results, so it never reads that page again: letting
+    the guess overwrite on every re-run put corrected women's races back
+    under 'men'.  Only page evidence changes a stored gender.
+    """
     conn.execute(
         """
         INSERT INTO races (pcs_slug, name, year, start_date, end_date, class,
@@ -118,7 +135,7 @@ def upsert_race(conn: sqlite3.Connection, data: dict) -> int:
             class         = excluded.class,
             country       = excluded.country,
             is_stage_race = excluded.is_stage_race,
-            gender        = excluded.gender
+            gender        = COALESCE(races.gender, excluded.gender)
         """,
         data,
     )
@@ -263,6 +280,11 @@ def uci_points_anomalies(rows, is_ttt: bool = False,
       non_monotonic    a finisher has more points than a better-placed one
       after_gap        points again after a better-placed finisher had none
       non_finisher     DNF/DNS/... row with points
+      single_scorer    (not a TTT) exactly one scorer among >= 20 finishers:
+                       a stage pays several places, so this is a GC tab
+                       stored for a team time trial whose stage profile
+                       says otherwise — La Vuelta Femenina 2023-2025 stage 1
+                       ('flat', the GC leader's 8 points only)
     The two order checks are skipped for team time trials (team shares are
     not ordered by individual position); a TTT is instead checked for
       ttt_shares_missing  fewer than 4 finishers with points (all of them in
@@ -284,6 +306,8 @@ def uci_points_anomalies(rows, is_ttt: bool = False,
         if finishers and sum(1 for _, pts in finishers if pts) < min(4, len(finishers)):
             reasons.add("ttt_shares_missing")
         return reasons
+    if len(finishers) >= 20 and sum(1 for _, pts in finishers if pts) == 1:
+        reasons.add("single_scorer")
     run_min = None
     gap = False
     for _, pts in sorted(finishers, key=lambda t: t[0]):
@@ -447,6 +471,112 @@ def find_null_gap_stages(conn: sqlite3.Connection, year: int, gender: str | None
              "reasons": [f"null_gaps({r[5]})"]} for r in conn.execute(sql, params).fetchall()]
 
 
+def find_duplicate_position_stages(conn: sqlite3.Connection, year: int, gender: str | None = None,
+                                   race_slugs: list[str] | None = None) -> list[dict]:
+    """Stages of ``year`` where two finished rows hold the same position.
+
+    The signature of an annulled result stored by the pre-Oct-2026 parser:
+    PCS strikes the rank through (``<s> 92 </s>``, Baudin on every Giro 2023
+    stage) and ranks the next rider in his place, and the old parser stored
+    the struck number as a finish — two riders 92nd.  Team time trials
+    (profile 'ttt') are skipped: riders share the team's time and place
+    order there is ours.  PCS itself prints real ties with one rank (time
+    trials timed to the second: Tour de Suisse 2026 stage 4, Kelderman and
+    Côté both 22nd); those stages stay selected and a refresh leaves them as
+    they are (no change, a cache hit).  DB only, no PCS traffic.  Returns
+    dicts like :func:`find_implausible_uci_stages`.
+    """
+    sql = """
+        SELECT s.id, s.pcs_slug, ra.pcs_slug, ra.id, s.date, COUNT(*) - COUNT(DISTINCT x.position)
+        FROM results x JOIN stages s ON s.id = x.stage_id JOIN races ra ON ra.id = s.race_id
+        WHERE ra.year = ? AND x.status = 'finished' AND x.position IS NOT NULL
+          AND COALESCE(s.profile_type, '') != 'ttt'
+    """
+    params: list = [year]
+    if gender:
+        sql += " AND ra.gender = ?"
+        params.append(gender)
+    if race_slugs:
+        sql += f" AND ra.pcs_slug IN ({','.join('?' * len(race_slugs))})"
+        params.extend(race_slugs)
+    sql += " GROUP BY s.id HAVING COUNT(*) > COUNT(DISTINCT x.position) ORDER BY s.date, s.id"
+    return [{"stage_id": r[0], "pcs_slug": r[1], "race_slug": r[2], "race_id": r[3], "date": r[4],
+             "reasons": [f"duplicate_positions({r[5]})"]} for r in conn.execute(sql, params).fetchall()]
+
+
+def find_race_gender_suspects(conn: sqlite3.Connection, year: int | None = None,
+                              race_slugs: list[str] | None = None, min_share: float = 0.3) -> list[dict]:
+    """Races whose stored gender their own riders contradict (DB only).
+
+    The calendar scrape guesses a race's gender from its name and class, and
+    the men's calendar circuits list women's races of the same classes —
+    some with no marker in the name (Tour El Salvador 2024-2026, GP Oetingen,
+    GP Lucien Van Impe), so they were stored as 'men' and fed the men's model.
+    A race is a suspect when
+
+    * stored 'men': at least ``min_share`` of its riders (3 or more) also
+      have a result in a race stored as 'women' — in a real men's race that
+      share is 0 (Oct 2026: 15 races at 31-100%, none between 2 and 30%);
+    * stored 'women': most of its riders who rode other races rode mostly
+      races stored as 'men' (the men's suspects above not counted).
+
+    Only a pointer: the race's own page ("Race category: WE / ME", see
+    main.py race-gender) decides.  Returns dicts {race_id, pcs_slug, name,
+    gender, riders, other_gender_riders, reason} ordered by year, slug.
+    """
+    where, params = "", []
+    if year is not None:
+        where += " AND ra.year = ?"
+        params.append(year)
+    if race_slugs:
+        where += f" AND ra.pcs_slug IN ({','.join('?' * len(race_slugs))})"
+        params.extend(race_slugs)
+    races = {r[0]: r[1:] for r in conn.execute(
+        f"SELECT ra.id, ra.pcs_slug, ra.name, COALESCE(ra.gender, 'men'), ra.year FROM races ra WHERE 1 = 1{where}",
+        params)}
+    rider_races: dict[int, dict[int, str]] = {}
+    for rid, race, gender in conn.execute(
+            """SELECT DISTINCT x.rider_id, s.race_id, COALESCE(ra.gender, 'men') FROM results x
+               JOIN stages s ON s.id = x.stage_id JOIN races ra ON ra.id = s.race_id"""):
+        rider_races.setdefault(rid, {})[race] = gender
+    race_riders: dict[int, list[int]] = {}
+    for rid, rs in rider_races.items():
+        for race in rs:
+            if race in races:
+                race_riders.setdefault(race, []).append(rid)
+    def crossing(race: int, other: str, skip: set[int]) -> int:
+        return sum(1 for rid in race_riders[race]
+                   if any(g == other for r, g in rider_races[rid].items() if r != race and r not in skip))
+
+    out = []
+    men_suspects: set[int] = set()
+    for race, riders in race_riders.items():
+        slug, name, gender, ry = races[race]
+        if gender != "men":
+            continue
+        n = crossing(race, "women", set())
+        if n >= 3 and n >= min_share * len(riders):
+            men_suspects.add(race)
+            out.append({"race_id": race, "pcs_slug": slug, "name": name, "gender": gender, "year": ry,
+                        "riders": len(riders), "other_gender_riders": n,
+                        "reason": f"{n}/{len(riders)} riders also rode women's races"})
+    for race, riders in race_riders.items():
+        slug, name, gender, ry = races[race]
+        if gender != "women":
+            continue
+        # a men's suspect is no evidence: its riders are the women in question
+        own = other = 0
+        for rid in riders:
+            others = [g for r, g in rider_races[rid].items() if r != race and r not in men_suspects]
+            other += others.count("men") > others.count("women")
+            own += others.count("women") > others.count("men")
+        if other > own:
+            out.append({"race_id": race, "pcs_slug": slug, "name": name, "gender": gender, "year": ry,
+                        "riders": len(riders), "other_gender_riders": crossing(race, "men", men_suspects),
+                        "reason": f"{other} riders ride mostly men's races, {own} mostly women's"})
+    return sorted(out, key=lambda r: (r["year"], r["pcs_slug"]))
+
+
 def _rider_result_stage_key(race_slug: str | None, result_url: str | None) -> tuple[str | None, str]:
     """(stored stage slug, suffix) of a rider_uci_results row.
 
@@ -485,6 +615,16 @@ def find_stages_disagreeing_with_rider_results(conn: sqlite3.Connection, year: i
     (``race/dauphine`` stored, ``race/tour-auvergne-rhone-alpes`` on the rider
     page) are matched by date + stage suffix + shared riders.  DB only, no
     PCS traffic.  Returns dicts like :func:`find_implausible_uci_stages`.
+
+    rider_uci_results keeps scoring rows only (db/uci_points.py), so:
+
+    * points — a scraped rider (:func:`_rider_page_coverage`) with no stage /
+      one-day row on the stage's day or under its slug scored 0 there; a
+      stored row giving him points on or before the last result his pages
+      listed is ``uci_points_differ``.  Riders never scraped, partial scrapes
+      and stages after the rider's pages were fetched are not judged;
+    * positions — compared only where the rider page has a (scoring) row:
+      the order of riders who finished outside the points is not checked.
     """
     has_table = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'rider_uci_results'").fetchone()
@@ -515,24 +655,32 @@ def find_stages_disagreeing_with_rider_results(conn: sqlite3.Connection, year: i
         if isinstance(pts, float) and not pts.is_integer():
             st["ttt"] = True  # team time-trial shares (Ses Salines-Felanitx is stored as 'flat')
     rur: dict[str, dict] = {}
+    page_keys: dict[str, set] = {}   # rider -> stage slugs of his stage / one-day rows
+    page_days: dict[str, set] = {}   # rider -> days of his stage / one-day rows
     for rider, rslug, url, label, pos, status, pts, day in conn.execute(
             """SELECT rider_slug, race_slug, result_url, result_label, position, status, points_uci, date
                FROM rider_uci_results WHERE season = ? AND result_kind IN ('stage', 'oneday')""",
             (year,)):
+        page_days.setdefault(rider, set()).add(day)
         key, suffix = _rider_result_stage_key(rslug, url)
         if key is None:
             continue
+        page_keys.setdefault(rider, set()).add(key)
         g = rur.setdefault(key, {"suffix": suffix, "date": day, "ttt": False, "rows": {}})
         g["ttt"] = g["ttt"] or "(TTT)" in (label or "")
         g["rows"][rider] = (pos, status, pts)
-    out = []
+    flagged: dict[str, set] = {}
     for key, g in rur.items():
         st = stored.get(key)
         if st is None:  # renamed race: same day, same stage, most shared riders
             cands = [stored[c] for c in by_date_suffix.get((g["date"], g["suffix"]), [])]
             scored = sorted(((len(set(c["rows"]) & set(g["rows"])), c["pcs_slug"]) for c in cands),
                             reverse=True)
-            if not scored or scored[0][0] < 3 or (len(scored) > 1 and scored[1][0] == scored[0][0]):
+            # 3 shared riders, or all of a smaller group (scoring rows only: a
+            # stage may have one or two scraped scorers); a rider rides one
+            # race a day, so a unique best candidate is the race
+            need = min(3, len(g["rows"]))
+            if not scored or scored[0][0] < need or (len(scored) > 1 and scored[1][0] == scored[0][0]):
                 continue
             st = stored[scored[0][1]]
         reasons: set[str] = set()
@@ -545,9 +693,50 @@ def find_stages_disagreeing_with_rider_results(conn: sqlite3.Connection, year: i
             if not (st["ttt"] or g["ttt"]) and status != "dsq" and pos != db_pos:
                 reasons.add("positions_differ")
         if reasons:
-            out.append({k: st[k] for k in ("stage_id", "pcs_slug", "race_slug", "race_id", "date")}
-                       | {"reasons": sorted(reasons)})
+            flagged.setdefault(st["pcs_slug"], set()).update(reasons)
+    # a scraped rider without a row on the stage: his pages say 0 points
+    coverage = _rider_page_coverage(conn, year)
+    for st in stored.values():
+        for rider, (_pos, _status, db_pts) in st["rows"].items():
+            last = coverage.get(rider)
+            if last is None or not st["date"] or st["date"] > last or round(float(db_pts or 0), 2) == 0:
+                continue
+            if st["pcs_slug"] in page_keys.get(rider, ()) or st["date"] in page_days.get(rider, ()):
+                continue
+            flagged.setdefault(st["pcs_slug"], set()).add("uci_points_differ")
+    out = [{k: stored[slug][k] for k in ("stage_id", "pcs_slug", "race_slug", "race_id", "date")}
+           | {"reasons": sorted(reasons)} for slug, reasons in flagged.items()]
     return sorted(out, key=lambda r: (r["date"] or "", r["stage_id"]))
+
+
+def _rider_page_coverage(conn: sqlite3.Connection, year: int) -> dict[str, str]:
+    """{rider_slug: last result date his stored PCS results pages listed} for ``year``.
+
+    Only riders whose missing rider_uci_results row means "0 points": a
+    ``rider_uci_scrapes`` record with ``complete`` 1 or NULL (NULL = stored
+    before the records existed, backfilled by the prune) — ``last_date``
+    counts every row the pages showed, zero-point ones included — or, on a
+    DB without records, the rider's own rows (zero-point rows still stored
+    there).  A partial scrape (``complete`` = 0) is left out: a page that
+    failed may have held the stage.
+    """
+    cov: dict[str, str] = {}
+    partial: set[str] = set()
+    has_scrapes = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'rider_uci_scrapes'").fetchone()
+    if has_scrapes:
+        for rider, last, complete in conn.execute(
+                "SELECT rider_slug, last_date, complete FROM rider_uci_scrapes WHERE season = ?", (year,)):
+            if complete == 0:
+                partial.add(rider)
+            elif last:
+                cov[rider] = last
+    for rider, last in conn.execute(
+            "SELECT rider_slug, MAX(date) FROM rider_uci_results WHERE season = ? GROUP BY rider_slug",
+            (year,)):
+        if rider not in partial and last and last > cov.get(rider, ""):
+            cov[rider] = last
+    return cov
 
 
 # ── DB loaders (used by model/predict.py for start-list predictions) ──────────

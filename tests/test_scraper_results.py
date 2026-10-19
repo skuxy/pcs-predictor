@@ -398,3 +398,113 @@ def test_empty_pcs_page_returns_nothing(monkeypatch):
     monkeypatch.setattr(results_mod, "fetch", lambda url, use_cache=True: "<html><head></head><body></body></html>")
     monkeypatch.setattr(results_mod, "_try_playwright", lambda url: pytest.fail("needless re-fetch"))
     assert fetch_stage_results("race/dauphine/2026/stage-2") == []
+
+
+# ── annulled results (struck-through rank) ─────────────────────────────────
+
+def test_struck_rank_is_an_annulled_result_not_a_finish():
+    # San Juan 2023 stage 5: Miguel Ángel López's win was annulled; PCS keeps
+    # him in the list with "<s> 1 </s>" and ranks Ganna 1st.  The old parser
+    # stored two 1st places.  A struck mid-table rank (Gp de Wallonie 2023,
+    # Bonnamour 6th) carries its gap into the next ",," row.  Every gap is
+    # still printed from López's 4:07:10: Ganna's 4:07:40 makes them 30 s
+    # too large (Higuita "0:38" is 8 s behind Ganna).
+    rows = (
+        _live_row('<s>&nbsp;1&nbsp;</s>', 215, "miguel-angel-lopez-moreno", "LÓPEZ Miguel Ángel",
+                  "team-medellin-2023", "Team Medellín - EPM", "", "", "4:07:10")
+        + _live_row(1, 62, "filippo-ganna", "GANNA Filippo", "ineos-grenadiers-2023",
+                    "INEOS Grenadiers", '20 <span class="red fs10">-15</span>', "30", "4:07:40")
+        + _live_row(2, 12, "sergio-higuita", "HIGUITA Sergio", "bora-hansgrohe-2023",
+                    "BORA - hansgrohe", "15", "18", "0:38")
+        + _live_row('<s>&nbsp;3&nbsp;</s>', 13, "franck-bonnamour", "BONNAMOUR Franck",
+                    "ag2r-citroen-team-2023", "AG2R Citroën Team", "", "", "1:05")
+        + _live_row(4, 61, "egan-bernal", "BERNAL Egan", "ineos-grenadiers-2023",
+                    "INEOS Grenadiers", "10", "12", ",,")
+    )
+    res = {r["rider_slug"]: r for r in _parse_results_table(_live_table(rows))}
+    lopez, bonnamour = res["miguel-angel-lopez-moreno"], res["franck-bonnamour"]
+    assert (lopez["position"], lopez["status"], lopez["time_seconds"]) == (None, "dsq", None)
+    assert (bonnamour["position"], bonnamour["status"], bonnamour["time_seconds"]) == (None, "dsq", None)
+    assert lopez["bib"] == 215                   # bib still read (rider-merge evidence)
+    assert (res["filippo-ganna"]["position"], res["filippo-ganna"]["time_seconds"]) == (1, 0)
+    assert (res["sergio-higuita"]["position"], res["sergio-higuita"]["time_seconds"]) == (2, 8)
+    assert (res["egan-bernal"]["position"], res["egan-bernal"]["time_seconds"]) == (4, 35)  # ",," after 1:05
+    finished = [r["position"] for r in res.values() if r["status"] == "finished"]
+    assert len(finished) == len(set(finished))
+
+
+def test_empty_rider_placeholder_row_is_skipped():
+    # San Juan 2023 stage 4 lists a nameless DNF row: <a href="rider/"></a>.
+    # It was parsed as a rider with the slug 'rider'.
+    rows = (_live_row(1, 1, "a-a", "A A", "t-2023", "T", "", "", "4:00:00")
+            + _live_row("DNF", "", "", "", "", "", "", "", ""))
+    got = [(r["rider_slug"], r["status"]) for r in _parse_results_table(_live_table(rows))]
+    assert got == [("a-a", "finished")]
+    legacy = _table(_row(1, "winner", "4:53:12") + _row("DNF", "", ""))
+    assert [r["rider_slug"] for r in _parse_results_table(legacy)] == ["winner"]
+
+
+def test_struck_winner_offset_same_time_or_gap():
+    # Tour de Normandie Féminin 2023 stage 3: the annulled winner and the new
+    # one share the time (",,"): no offset
+    same = (_live_row('<s>&nbsp;1&nbsp;</s>', 1, "a-a", "A A", "t-2023", "T", "", "", "2:55:21")
+            + _live_row(1, 2, "b-b", "B B", "t-2023", "T", "", "", "2:55:21")
+            + _live_row(2, 3, "c-c", "C C", "t-2023", "T", "", "", ",,")
+            + _live_row(3, 4, "d-d", "D D", "t-2023", "T", "", "", "0:12"))
+    got = {r["rider_slug"]: r["time_seconds"] for r in _parse_results_table(_live_table(same))}
+    assert got == {"a-a": None, "b-b": 0, "c-c": 0, "d-d": 12}
+    # the new winner's cell printed as a gap to the annulled one
+    gap = (_live_row('<s>&nbsp;1&nbsp;</s>', 1, "a-a", "A A", "t-2023", "T", "", "", "4:00:00")
+           + _live_row(1, 2, "b-b", "B B", "t-2023", "T", "", "", "0:05")
+           + _live_row(2, 3, "c-c", "C C", "t-2023", "T", "", "", "0:09"))
+    got = {r["rider_slug"]: r["time_seconds"] for r in _parse_results_table(_live_table(gap))}
+    assert got == {"a-a": None, "b-b": 0, "c-c": 4}
+    # legacy markup, same rule
+    legacy = _table(_row("<s>1</s>", "annulled", "4:53:12") + _row(1, "winner", "4:53:20")
+                    + _row(2, "second", "0:20") + _row(3, "third", ",,"))
+    got = {r["rider_slug"]: r["time_seconds"] for r in _parse_results_table(legacy)}
+    assert got == {"annulled": None, "winner": 0, "second": 12, "third": 12}
+
+
+def test_struck_rank_in_legacy_and_basic_tables():
+    legacy = _table(_row(1, "winner", "4:53:12") + _row("<s>2</s>", "annulled", "0:12")
+                    + _row(2, "second", ",,"))
+    res = {r["rider_slug"]: r for r in _parse_results_table(legacy)}
+    assert (res["annulled"]["position"], res["annulled"]["status"]) == (None, "dsq")
+    assert (res["second"]["position"], res["second"]["time_seconds"]) == (2, 12)
+    basic = soup('<table class="basic"><tr><td><s>1</s></td><td><a href="rider/a-b">A B</a></td></tr>'
+                 '<tr><td>1</td><td><a href="rider/c-d">C D</a></td></tr></table>').find("table")
+    got = [(r["rider_slug"], r["position"], r["status"]) for r in _parse_results_table(basic)]
+    assert got == [("a-b", None, "dsq"), ("c-d", 1, "finished")]
+
+
+# ── team time trial non-finishers ───────────────────────────────────────────
+
+TTT_DNS_PAGE = TTT_PAGE.replace(
+    '<tr><td><a href="rider/filippo-ganna">GANNA Filippo</a></td><td>40</td><td>18.75</td></tr>',
+    '<tr><td><a href="rider/filippo-ganna">GANNA Filippo</a></td><td>40</td><td>18.75</td></tr>'
+    '<tr><td><a href="rider/mauro-schmid"><font class="red">DNS</font> SCHMID Mauro</a></td>'
+    '<td>0</td><td>0</td></tr>'
+    '<tr><td><a href="rider/mark-padun"><font class="red">OTL</font> PADUN Mark &nbsp;'
+    '<font class="blue">+8:53</font></a></td><td>0</td><td>0</td></tr>'
+    '<tr><td><a href="rider/josh-tarling">TARLING Josh <font class="blue">+0:20</font></a></td>'
+    '<td>40</td><td>18.75</td></tr>')
+
+
+def test_ttt_status_marker_makes_a_non_finisher():
+    # Paris-Nice 2023 stage 3 (Schmid DNS) and Okolo Slovenska 2024 stage 1
+    # (Padun OTL +8:53): the old parser ranked both as finishers at the team
+    # time (link.find('font') took the red marker as the gap font).
+    res = _parse_ttt_results(select_stage_result(soup(TTT_DNS_PAGE)))
+    by = {r["rider_slug"]: r for r in res}
+    assert (by["mauro-schmid"]["position"], by["mauro-schmid"]["status"],
+            by["mauro-schmid"]["time_seconds"]) == (None, "dns", None)
+    assert (by["mark-padun"]["position"], by["mark-padun"]["status"],
+            by["mark-padun"]["time_seconds"]) == (None, "otl", None)
+    assert by["mauro-schmid"]["rider_name"] == "SCHMID Mauro"
+    assert by["mark-padun"]["rider_name"] == "PADUN Mark"
+    # finishers keep consecutive ranks; the blue gap is still read
+    ranked = [(r["position"], r["rider_slug"], r["time_seconds"]) for r in res if r["status"] == "finished"]
+    assert ranked == [(1, "jonas-vingegaard", 0), (2, "filippo-ganna", 7),
+                      (3, "josh-tarling", 27), (4, "sepp-kuss", 117)]
+    assert [r["rider_slug"] for r in res[-2:]] == ["mauro-schmid", "mark-padun"]

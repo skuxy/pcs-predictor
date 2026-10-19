@@ -9,8 +9,14 @@ from db.database import (
     init_db, get_conn, upsert_race, upsert_stage, upsert_rider, insert_result,
     fill_result_teams, fill_stage_meta, find_implausible_uci_stages, repair_stage_points,
     delete_stage_rows, find_null_gap_stages, find_stages_disagreeing_with_rider_results,
+    find_duplicate_position_stages, find_race_gender_suspects,
 )
-from scraper.races import iter_races, fetch_race_stages, fetch_stage_meta, find_race_alias, is_missing_page
+from db.rider_merge import (
+    canonical_rows, page_fetched_on, ensure_rider_merge_schema, build_plan, apply_plan,
+    load_pairs_file, revalidate_plan, resolve_rider_slug,
+)
+from scraper.races import (iter_races, fetch_race_stages, fetch_stage_meta, find_race_alias, is_missing_page,
+                           gender_from_category)
 from scraper.utils import fetch, pcs_url
 from scraper.results import fetch_stage_results
 from scraper.riders import fetch_rider
@@ -42,6 +48,27 @@ def _within_race_window(conn, race_id: int, meta: dict) -> dict:
         if not lo <= meta["date"] <= hi:
             meta = {**meta, "date": None}
     return meta
+
+
+def _sync_race_gender(conn, race_id: int, meta: dict, dry_run: bool = False) -> str | None:
+    """Set the race's gender from a page's "Race category" (``WE`` → women).
+
+    The calendar row is only a guess (scraper.races._detect_gender): the men's
+    circuits list women's races with no marker in the name (Tour El Salvador
+    2024-2026 was stored as 'men' and fed the men's model).  Returns the new
+    gender when the stored one changed, else None.
+    """
+    gender = gender_from_category((meta or {}).get("race_category"))
+    if gender is None:
+        return None
+    row = conn.execute("SELECT pcs_slug, gender FROM races WHERE id = ?", (race_id,)).fetchone()
+    if row is None or row[1] == gender:
+        return None
+    log.warning("race %s: PCS race category %s — gender %s -> %s%s", row[0], meta["race_category"],
+                row[1], gender, " [dry run]" if dry_run else "")
+    if not dry_run:
+        conn.execute("UPDATE races SET gender = ? WHERE id = ?", (gender, race_id))
+    return gender
 
 
 def _db_stages(race_id: int) -> list[dict]:
@@ -164,8 +191,39 @@ def _fetch_slug(stage_slug: str, race_id: int, race_slug: str) -> str:
     return stage_slug
 
 
+def _canonical_results(conn, results: list[dict], fetch_slug: str | None,
+                       stage_id: int | None = None) -> list[dict]:
+    """Parsed rows with merged riders' old slugs mapped to the canonical rider.
+
+    ``merge-riders`` records ``rider_slug_aliases``; a cached page fetched
+    before PCS re-slugged a rider still links the old slug, which would
+    otherwise re-create the merged-away riders row.  An old slug on the page
+    is the merged rider when it carries a bib he wore in this race
+    (``stage_id``'s race; a different bib is a namesake), else when the page
+    was fetched (cache file date) on or before the old slug's last stored
+    result: PCS hands old slugs to namesakes (``romain-gregoire1``).  A row
+    neither settles keeps the old slug and ``alias_unresolved``.  See
+    db.rider_merge.canonical_rows.
+    """
+    fetched_on = page_fetched_on(fetch_slug) if fetch_slug else None
+    rows = canonical_rows(conn, results, fetched_on, stage_id)
+    for r in rows:
+        if r.get("page_slug"):
+            log.info("  %s on the page is merged rider %s (%s)", r["page_slug"], r["rider_slug"],
+                     "same bib in this race" if r.get("alias_by") == "bib" else "page fetched before the switch")
+        elif r.get("alias_other_bib"):
+            log.info("  %s on the page (bib %s) is not merged rider %s (bib %s in this race): another rider",
+                     r["rider_slug"], r.get("bib"), resolve_rider_slug(conn, r["rider_slug"]),
+                     "/".join(map(str, r["alias_other_bib"])))
+        elif r.get("alias_unresolved"):
+            log.warning("  %s on the page is an old slug of %s, but the page was fetched after its last "
+                        "stored result and no bib settles it", r["rider_slug"], r["alias_unresolved"])
+    return rows
+
+
 def _store_stage_results(conn, stage_id: int, results: list[dict], skip_riders: bool,
                          riders_seen: dict[str, int]) -> None:
+    """Store parsed rows (slugs already canonical: see ``_canonical_results``)."""
     for r in results:
         slug = r["rider_slug"]
         if slug not in riders_seen:
@@ -250,9 +308,11 @@ def _scrape_race_results(race_id: int, race_slug: str, skip_riders: bool,
         # route — shortened stages, changed towns, a day's shift).
         meta = fetch_stage_meta(fetch_slug)
         with get_conn() as conn:
+            results = _canonical_results(conn, results, fetch_slug, stage_id)
             _store_stage_results(conn, stage_id, results, skip_riders, riders_seen)
             if meta:
                 fill_stage_meta(conn, stage_id, _within_race_window(conn, race_id, meta), overwrite=True)
+                _sync_race_gender(conn, race_id, meta)
         total += len(results)
         via = f" (from {fetch_slug})" if fetch_slug != stage_data["pcs_slug"] else ""
         log.info("  stage %s → %d results%s", stage_data["pcs_slug"], len(results), via)
@@ -541,12 +601,14 @@ def _backfill_teams(year: int, today: str, gender: str | None, race_slugs: list[
     log.info("backfill-teams: %d stages with rows lacking team data", len(stages))
     filled_total = 0
     for i, st in enumerate(stages, 1):
-        results = fetch_stage_results(_fetch_slug(st["pcs_slug"], st["race_id"], st["race_slug"]))
+        fetch_slug = _fetch_slug(st["pcs_slug"], st["race_id"], st["race_slug"])
+        results = fetch_stage_results(fetch_slug)
         if not results:
             log.warning("  [%d/%d] %s: no results parsed — skipped", i, len(stages), st["pcs_slug"])
             continue
         filled = unmatched = 0
         with get_conn() as conn:
+            results = _canonical_results(conn, results, fetch_slug, st["id"])
             ids = {r["pcs_slug"]: r["id"] for r in conn.execute(
                 """SELECT rd.pcs_slug, rd.id FROM results x JOIN riders rd ON rd.id = x.rider_id
                    WHERE x.stage_id = ?""", (st["id"],)).fetchall()}
@@ -561,6 +623,37 @@ def _backfill_teams(year: int, today: str, gender: str | None, race_slugs: list[
         log.info("  [%d/%d] %s: %d rows filled (%d page rows not in DB)", i, len(stages),
                  st["pcs_slug"], filled, unmatched)
     log.info("backfill-teams complete: %d rows filled", filled_total)
+
+
+def _mark_team_time_trial(conn, stage_id: int, results: list[dict]) -> bool:
+    """Set ``profile_type = 'ttt'`` on a stage whose page is a team time trial.
+
+    The first scrape stored some TTTs from the GC tab under another profile
+    (La Vuelta Femenina 2023-2025 stage 1, 'flat'); the page's own meta may
+    say 'itt' ("Won how: time trial"), so the parsed rows decide
+    (``team_time_trial``, set by scraper.results._parse_ttt_results).
+    Returns True when the stored profile changed.
+    """
+    if not any(r.get("team_time_trial") for r in results):
+        return False
+    return conn.execute("UPDATE stages SET profile_type = 'ttt' WHERE id = ? AND "
+                        "COALESCE(profile_type, '') != 'ttt'", (stage_id,)).rowcount > 0
+
+
+def _log_unmatched(conn, stage_id: int, results: list[dict], rep: dict) -> None:
+    """Log both sides of a slug mismatch with bibs, so a re-slugged rider
+    (same bib, two slugs) can be paired from the log alone."""
+    if rep["unmatched_db"]:
+        stored = {slug: f"{slug} (bib {bib}, {status} {pos})" for slug, bib, pos, status in conn.execute(
+            """SELECT rd.pcs_slug, x.bib, x.position, x.status FROM results x
+               JOIN riders rd ON rd.id = x.rider_id WHERE x.stage_id = ?""", (stage_id,))}
+        log.warning("  %d DB rows not on the page (left unchanged): %s", len(rep["unmatched_db"]),
+                    ", ".join(stored.get(s, s) for s in rep["unmatched_db"]))
+    page_only = [r for r in results if r["rider_slug"] not in rep["matched"]]
+    if page_only:
+        log.info("  %d page rows not in the DB (not inserted): %s", len(page_only),
+                 ", ".join(f"{r['rider_slug']} (bib {r.get('bib')}, {r.get('status')} {r.get('position')})"
+                           for r in page_only))
 
 
 def cmd_repair_points(args):
@@ -585,19 +678,22 @@ def cmd_repair_points(args):
     changed_rows = teams = 0
     for i, st in enumerate(suspects, 1):
         log.info("[%d/%d] %s (%s)", i, len(suspects), st["pcs_slug"], ", ".join(st["reasons"]))
-        results = fetch_stage_results(_fetch_slug(st["pcs_slug"], st["race_id"], st["race_slug"]))
+        fetch_slug = _fetch_slug(st["pcs_slug"], st["race_id"], st["race_slug"])
+        results = fetch_stage_results(fetch_slug)
         if not results:
             log.warning("  no results parsed — left unchanged")
             continue
         with get_conn() as conn:
+            # rows are matched by slug: old slugs of merged riders first
+            results = _canonical_results(conn, results, fetch_slug, st["stage_id"])
             rep = repair_stage_points(conn, st["stage_id"], results, dry_run=dry_run)
+            if not dry_run and _mark_team_time_trial(conn, st["stage_id"], results):
+                log.info("  profile_type -> ttt (team time trial page)")
+            _log_unmatched(conn, st["stage_id"], results, rep)
         for slug, old_pts, new_pts, old_pen, new_pen in rep["changed"]:
             log.info("  %s: points_uci %s -> %s, uci_penalty %s -> %s", slug, old_pts, new_pts, old_pen, new_pen)
         for slug, old_pos, new_pos, old_status, new_status in rep["moved"]:
             log.info("  %s: position %s (%s) -> %s (%s)", slug, old_pos, old_status, new_pos, new_status)
-        if rep["unmatched_db"]:
-            log.warning("  %d DB rows not on the page (left unchanged): %s", len(rep["unmatched_db"]),
-                        ", ".join(rep["unmatched_db"][:10]))
         changed_rows += len(rep["changed"])
         teams += rep["teams_filled"]
     with get_conn() as conn:
@@ -646,9 +742,12 @@ def _slug_aliases(page_rows: list[dict], stored: dict[str, str]) -> dict[str, st
     return {k: v for k, v in cands.items() if targets.count(v) == 1}
 
 
-def _sync_stage_results(stage_id: int, results: list[dict], dry_run: bool = False) -> dict:
+def _sync_stage_results(stage_id: int, results: list[dict], dry_run: bool = False,
+                        fetch_slug: str | None = None) -> dict:
     """Make one stored stage equal a fresh parse of its page.
 
+    * page slugs of merged riders are first mapped to the canonical rider
+      (``_canonical_results``; ``fetch_slug`` dates the cached page);
     * stored rows of riders on the page: every field refreshed
       (``repair_stage_points``);
     * page riders with no stored row: inserted (stub riders as in
@@ -657,27 +756,37 @@ def _sync_stage_results(stage_id: int, results: list[dict], dry_run: bool = Fals
       rider keeps his id and history;
     * stored riders no longer on the page: deleted, but only when the page
       parse is at least 90% the size of the stored stage (a truncated top-N
-      fallback table never deletes rows).
+      fallback table never deletes rows);
+    * an old slug of a merged rider that neither the bib nor the page date
+      settles (``alias_unresolved``): neither inserted nor allowed to prune
+      the merged rider's stored row (``held``) — inserting it could split
+      him again, pruning him could delete his result.
 
-    Returns repair_stage_points' report plus inserted / pruned / aliases.
+    Returns repair_stage_points' report plus inserted / pruned / aliases / held.
     """
     with get_conn() as conn:
+        results = _canonical_results(conn, results, fetch_slug, stage_id)
         stored = {r[0]: r[1] for r in conn.execute(
             """SELECT rd.pcs_slug, rd.name FROM results x JOIN riders rd ON rd.id = x.rider_id
                WHERE x.stage_id = ?""", (stage_id,))}
+        held = {r["rider_slug"]: r["alias_unresolved"] for r in results
+                if r.get("alias_unresolved") and r["rider_slug"] not in stored}
+        results = [r for r in results if r["rider_slug"] not in held]
         page_slugs = {r["rider_slug"] for r in results}
         aliases = _slug_aliases([r for r in results if r["rider_slug"] not in stored],
                                 {s: n for s, n in stored.items() if s not in page_slugs})
         rows = [dict(r, rider_slug=aliases.get(r["rider_slug"], r["rider_slug"])) for r in results]
         rep = repair_stage_points(conn, stage_id, rows, dry_run=dry_run)
         new_rows = [r for r in rows if r["rider_slug"] not in rep["matched"]]
-        prune = rep["unmatched_db"] if len(rows) >= 0.9 * len(stored) else []
+        keep = set(held.values())   # never prune a merged rider while his old slug is on the page
+        prune = [s for s in rep["unmatched_db"] if s not in keep] \
+            if len(rows) + len(held) >= 0.9 * len(stored) else []
         if not dry_run:
             _store_stage_results(conn, stage_id, new_rows, skip_riders=True, riders_seen={})
             delete_stage_rows(conn, stage_id, prune)
     rep.update({"inserted": [r["rider_slug"] for r in new_rows], "pruned": prune,
                 "kept_unmatched": [s for s in rep["unmatched_db"] if s not in prune],
-                "aliases": aliases})
+                "aliases": aliases, "held": held})
     return rep
 
 
@@ -690,6 +799,10 @@ def cmd_refresh_stages(args):
       --uci-mismatch  stages whose stored positions / points_uci disagree with
                       rider_uci_results (PCS corrected the order after the
                       first scrape; team time trials stored from the GC tab)
+      --dup-positions stages where two finished rows share a position: an
+                      annulled (struck-through) result the pre-Oct-2026 parser
+                      stored as a finish; real ties on PCS are re-selected
+                      and left as they are
       --stages        explicit stage slugs
     ``scrape-missing`` skips any stage that already has results, so these
     stages are never refreshed otherwise.  Pages come from the HTML cache when
@@ -711,6 +824,11 @@ def cmd_refresh_stages(args):
                 prev = selected.setdefault(st["stage_id"], st)
                 if prev is not st:
                     prev["reasons"] = sorted(set(prev["reasons"]) | set(st["reasons"]))
+        if getattr(args, "dup_positions", False):
+            for st in find_duplicate_position_stages(conn, args.year, gender, race_slugs):
+                prev = selected.setdefault(st["stage_id"], st)
+                if prev is not st:
+                    prev["reasons"] = sorted(set(prev["reasons"]) | set(st["reasons"]))
         for slug in _csv(getattr(args, "stages", None)):
             row = conn.execute(
                 """SELECT s.id, s.pcs_slug, s.date, ra.pcs_slug, ra.id FROM stages s
@@ -726,11 +844,12 @@ def cmd_refresh_stages(args):
     totals = {"stages": 0, "points": 0, "moved": 0, "retimed": 0, "inserted": 0, "pruned": 0}
     for i, st in enumerate(todo, 1):
         log.info("[%d/%d] %s (%s)", i, len(todo), st["pcs_slug"], ", ".join(st["reasons"]))
-        results = fetch_stage_results(_fetch_slug(st["pcs_slug"], st["race_id"], st["race_slug"]))
+        fetch_slug = _fetch_slug(st["pcs_slug"], st["race_id"], st["race_slug"])
+        results = fetch_stage_results(fetch_slug)
         if not results:
             log.warning("  no results parsed — left unchanged")
             continue
-        rep = _sync_stage_results(st["stage_id"], results, dry_run=dry_run)
+        rep = _sync_stage_results(st["stage_id"], results, dry_run=dry_run, fetch_slug=fetch_slug)
         meta = fetch_stage_meta(_fetch_slug(st["pcs_slug"], st["race_id"], st["race_slug"]))
         if meta and not dry_run:
             with get_conn() as conn:
@@ -738,7 +857,10 @@ def cmd_refresh_stages(args):
                 # first scrape may have missed (Ses Salines-Felanitx 2026, a
                 # one-day TTT, was stored as 'flat')
                 fill_stage_meta(conn, st["stage_id"], _within_race_window(conn, st["race_id"], meta))
-                if meta.get("profile_type") in ("itt", "ttt"):
+                _sync_race_gender(conn, st["race_id"], meta)
+                if _mark_team_time_trial(conn, st["stage_id"], results):
+                    log.info("  profile_type -> ttt (team time trial page)")
+                elif meta.get("profile_type") in ("itt", "ttt"):
                     cur = conn.execute("UPDATE stages SET profile_type = ? WHERE id = ? AND "
                                        "COALESCE(profile_type, '') != ?",
                                        (meta["profile_type"], st["stage_id"], meta["profile_type"]))
@@ -750,6 +872,9 @@ def cmd_refresh_stages(args):
             log.info("  %s: position %s (%s) -> %s (%s)", slug, old_pos, old_status, new_pos, new_status)
         for new, old in rep["aliases"].items():
             log.info("  %s on the page is stored rider %s — row updated in place", new, old)
+        for old, canon in rep.get("held", {}).items():
+            log.warning("  %s on the page left out and %s's stored row kept: an old slug of a merged "
+                        "rider that no bib or page date settles", old, canon)
         if rep["inserted"]:
             log.info("  inserted %d riders: %s", len(rep["inserted"]), ", ".join(rep["inserted"][:10]))
         if rep["pruned"]:
@@ -764,6 +889,159 @@ def cmd_refresh_stages(args):
                      ("inserted", len(rep["inserted"])), ("pruned", len(rep["pruned"]))):
             totals[k] += v
     log.info("refresh-stages complete: %s%s", totals, " [dry run]" if dry_run else "")
+
+
+def cmd_race_gender(args):
+    """Correct races stored under the wrong gender from their own PCS pages.
+
+    Candidates are the races their riders contradict
+    (db.database.find_race_gender_suspects, DB only) or, with ``--all``,
+    every race of the selection.  For each, the first stored stage page is
+    read (cache first; a one-day race also tries ``<slug>/result``) and its
+    "Race category" (WE / ME) sets ``races.gender``.  ``--dry-run`` logs
+    only.  Retrain the models afterwards: the gender decides which model a
+    race's results feed.
+    """
+    init_db()
+    year = getattr(args, "year", None)
+    race_slugs = _csv(getattr(args, "races", None))
+    dry_run = getattr(args, "dry_run", False)
+    with get_conn() as conn:
+        if getattr(args, "all", False):
+            sql, params = "SELECT id, pcs_slug, COALESCE(gender, 'men') FROM races WHERE 1 = 1", []
+            if year is not None:
+                sql += " AND year = ?"
+                params.append(year)
+            if race_slugs:
+                sql += f" AND pcs_slug IN ({','.join('?' * len(race_slugs))})"
+                params.extend(race_slugs)
+            todo = [{"race_id": r[0], "pcs_slug": r[1], "gender": r[2], "reason": "--all"}
+                    for r in conn.execute(sql + " ORDER BY year, pcs_slug", params)]
+        else:
+            todo = find_race_gender_suspects(conn, year, race_slugs)
+    log.info("race-gender: %d races to check%s", len(todo), " [dry run]" if dry_run else "")
+    changed = unknown = 0
+    for i, race in enumerate(todo, 1):
+        with get_conn() as conn:
+            stages = [r[0] for r in conn.execute(
+                """SELECT s.pcs_slug FROM stages s WHERE s.race_id = ?
+                   AND EXISTS (SELECT 1 FROM results x WHERE x.stage_id = s.id)
+                   ORDER BY s.date, s.id LIMIT 2""", (race["race_id"],))]
+        meta = {}
+        for stage_slug in stages:
+            fetch_slug = _fetch_slug(stage_slug, race["race_id"], race["pcs_slug"])
+            for slug in (fetch_slug, fetch_slug.rstrip("/") + "/result"):
+                meta = fetch_stage_meta(slug)
+                if meta.get("race_category") or slug.endswith("/result") or "/stage-" in fetch_slug:
+                    break
+            if meta.get("race_category"):
+                break
+        log.info("[%d/%d] %s (stored %s; %s): race category %s", i, len(todo), race["pcs_slug"],
+                 race["gender"], race["reason"], meta.get("race_category") or "not found")
+        if not meta.get("race_category"):
+            unknown += 1
+            continue
+        with get_conn() as conn:
+            if _sync_race_gender(conn, race["race_id"], meta, dry_run=dry_run):
+                changed += 1
+    log.info("race-gender complete: %d races %s, %d without a race category on their page%s",
+             changed, "would change" if dry_run else "changed", unknown, " [dry run]" if dry_run else "")
+
+
+def _span(dates) -> str:
+    return "..".join(d or "?" for d in dates) if dates else "not in DB"
+
+
+def _log_merge_plan(plan: dict) -> None:
+    for p in plan["pairs"]:
+        log.info("  MERGE %s (id %s, %s) -> %s (id %s, %s) [%s] %s: %d results, %d conflicts%s",
+                 p["old_slug"], p["old_id"], _span(p["old_dates"]), p["new_slug"], p["new_id"],
+                 _span(p["new_dates"]),
+                 "+".join(p["evidence_type"]), p["action"], p["rows_to_move"], len(p["conflicts"]),
+                 f" (chain {' -> '.join(p['chain'])})" if p.get("chain") else "")
+    for u in plan["unconfirmed"]:
+        notes = [n for n, on in (("interleaved", u.get("interleaved")),
+                                 ("gender differs", u.get("gender_differs"))) if on]
+        log.info("  unconfirmed %s -> %s (%s, %s names%s): %s", u["old_slug"], u["new_slug"],
+                 u["evidence_type"], u.get("name_strength"), "".join(f", {n}" for n in notes), u["reason"])
+    for r in plan["rejected"]:
+        log.warning("  rejected %s -> %s (%s): %s", r["old_slug"], r["new_slug"], r["evidence_type"],
+                    r["reason"])
+
+
+def cmd_merge_riders(args):
+    """Find riders PCS re-slugged mid-season and merge their two riders rows.
+
+    Evidence (see db/rider_merge.py): (a) same stage + bib under two slugs on
+    cached stage pages (offline), (c) ``--pairs FILE`` from elsewhere, and
+    (b) compatible names + activity on no common day (consecutive or
+    interleaved) confirmed on the NEW slug's
+    PCS results pages (``--min-match`` share of the old row's results with the
+    same date and position; never the old slug's page — PCS reuses old slugs
+    for namesakes).  Confirmed pairs are merged, one transaction each; the
+    rest is reported.  ``--dry-run`` only builds (and with ``--plan-out``
+    writes) the plan; ``--offline-only`` skips the PCS confirmation.
+    """
+    import json
+    import time
+    init_db()
+    dry_run = getattr(args, "dry_run", False)
+    with get_conn() as conn:
+        ensure_rider_merge_schema(conn)
+    if getattr(args, "from_plan", None):
+        # apply exactly a reviewed plan (no detection), re-checked against the DB
+        plan = json.loads(Path(args.from_plan).read_text(encoding="utf-8"))
+        with get_conn() as conn:
+            keep, dropped = revalidate_plan(conn, plan)
+        for d in dropped:
+            log.warning("  plan pair %s -> %s no longer passes: %s", d["old_slug"], d["new_slug"], d["reason"])
+        plan = {**plan, "pairs": keep, "dropped_at_apply": dropped, "dry_run": dry_run,
+                "applied_from": args.from_plan}
+        log.info("merge-riders --from-plan %s: %d pairs to apply, %d dropped%s", args.from_plan,
+                 len(keep), len(dropped), " [dry run]" if dry_run else "")
+        _log_merge_plan({"pairs": keep, "unconfirmed": [], "rejected": []})
+        if not dry_run:
+            plan["applied"] = apply_plan(get_conn, plan)
+            for rep in plan["applied"]:
+                log.info("  merged %s -> %s: %s, %d results moved, %d conflicts", rep["old_slug"],
+                         rep["new_slug"], rep["action"], rep["results_moved"], len(rep["conflicts"]))
+        if getattr(args, "plan_out", None):
+            Path(args.plan_out).write_text(json.dumps(plan, indent=2, ensure_ascii=False, default=str),
+                                           encoding="utf-8")
+        return
+    pairs = load_pairs_file(args.pairs) if getattr(args, "pairs", None) else []
+    t0 = time.time()
+    with get_conn() as conn:
+        plan = build_plan(conn, years=getattr(args, "year", None) or None,
+                          offline_only=getattr(args, "offline_only", False), pairs=pairs,
+                          min_match=getattr(args, "min_match", 0.8),
+                          max_gap_days=getattr(args, "max_gap_days", 200),
+                          max_confirm=getattr(args, "max_confirm", 200))
+    plan["stats"]["detect_seconds"] = round(time.time() - t0, 1)
+    plan.update({"db": DB_PATH, "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+                 "dry_run": dry_run, "years": getattr(args, "year", None) or [],
+                 "min_match": getattr(args, "min_match", 0.8)})
+    log.info("merge-riders: %d confirmed pairs, %d unconfirmed candidates, %d rejected%s — %s",
+             len(plan["pairs"]), len(plan["unconfirmed"]), len(plan["rejected"]),
+             " [dry run]" if dry_run else "", plan["stats"])
+    _log_merge_plan(plan)
+    if not dry_run:
+        plan["applied"] = apply_plan(get_conn, plan)
+        for rep in plan["applied"]:
+            log.info("  merged %s -> %s: %s, %d results moved, %d conflicts, %d predictions, %d bets; "
+                     "slug tables %s", rep["old_slug"], rep["new_slug"], rep["action"],
+                     rep["results_moved"], len(rep["conflicts"]), rep["predictions_moved"],
+                     rep["bets_moved"], rep["slug_tables"] or "-")
+            for c in rep["conflicts"]:
+                log.info("    %s: kept %s row %s, deleted %s (%s)", c["stage"], c["kept"], c["kept_row"],
+                         c["deleted_row"], c["reason"])
+    if getattr(args, "plan_out", None):
+        Path(args.plan_out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.plan_out).write_text(json.dumps(plan, indent=2, ensure_ascii=False, default=str),
+                                       encoding="utf-8")
+        log.info("plan written to %s", args.plan_out)
+    log.info("merge-riders complete: %s", "dry run, nothing written" if dry_run
+             else f"{len(plan.get('applied', []))} pairs merged")
 
 
 def _load_script(name: str):
@@ -970,7 +1248,8 @@ def main(argv=None):
     p_refresh = sub.add_parser(
         "refresh-stages",
         help="Re-parse stored stages (cache first) and sync every row: NULL time-trial gaps, "
-             "orders PCS corrected after the first scrape, explicit stages",
+             "orders PCS corrected after the first scrape, annulled results stored as finishes, "
+             "explicit stages",
     )
     p_refresh.add_argument("--year", type=int, required=True, help="Season, e.g. 2026")
     p_refresh.add_argument("--gender", choices=["men", "women"], help="Only races of this gender")
@@ -979,10 +1258,51 @@ def main(argv=None):
                            help="Stages with ranked finishers lacking a time gap")
     p_refresh.add_argument("--uci-mismatch", action="store_true", dest="uci_mismatch",
                            help="Stages whose rows disagree with rider_uci_results (scrape-uci-points)")
+    p_refresh.add_argument("--dup-positions", action="store_true", dest="dup_positions",
+                           help="Stages where two finished rows share a position (annulled results "
+                                "stored as finishes before Oct 2026)")
     p_refresh.add_argument("--stages", help="Comma-separated stage slugs to refresh")
     p_refresh.add_argument("--dry-run", action="store_true", dest="dry_run",
                            help="Log the changes without writing them")
     p_refresh.set_defaults(func=cmd_refresh_stages)
+
+    p_gender = sub.add_parser(
+        "race-gender",
+        help="Correct races stored under the wrong gender from their PCS pages' race category (WE/ME)",
+    )
+    p_gender.add_argument("--year", type=int, help="Only races of this season")
+    p_gender.add_argument("--races", help="Comma-separated race slugs to restrict to")
+    p_gender.add_argument("--all", action="store_true",
+                          help="Check every selected race, not only those its riders contradict "
+                               "(one page per race)")
+    p_gender.add_argument("--dry-run", action="store_true", dest="dry_run",
+                          help="Log the changes without writing")
+    p_gender.set_defaults(func=cmd_race_gender)
+
+    p_merge = sub.add_parser(
+        "merge-riders",
+        help="Find riders PCS re-slugged (thomas-pidcock -> tom-pidcock) and merge their split rows",
+    )
+    p_merge.add_argument("--year", type=int, nargs="+", action="extend",
+                         help="Only re-slugs around these seasons (default: all)")
+    p_merge.add_argument("--dry-run", action="store_true", dest="dry_run",
+                         help="Build and report the plan without merging")
+    p_merge.add_argument("--offline-only", action="store_true", dest="offline_only",
+                         help="No PCS traffic: name candidates are reported, not confirmed")
+    p_merge.add_argument("--pairs", help="JSON file of externally found pairs "
+                                         '[{"old_slug", "new_slug", "evidence"}]')
+    p_merge.add_argument("--plan-out", dest="plan_out", help="Write the plan (and results) as JSON")
+    p_merge.add_argument("--from-plan", dest="from_plan",
+                         help="Apply the confirmed pairs of a saved (reviewed) plan instead of detecting; "
+                              "each pair is re-checked against the DB first")
+    p_merge.add_argument("--min-match", type=float, default=0.8, dest="min_match",
+                         help="Share of the old slug's results the new slug's PCS page must list "
+                              "(default 0.8)")
+    p_merge.add_argument("--max-gap-days", type=int, default=200, dest="max_gap_days",
+                         help="Max days between the old slug's last and the new slug's first result")
+    p_merge.add_argument("--max-confirm", type=int, default=200, dest="max_confirm",
+                         help="Max name candidates confirmed on PCS per run (default 200)")
+    p_merge.set_defaults(func=cmd_merge_riders)
 
     # Team UCI points: both delegate to scripts/*.py run(argv) — every option
     # after the subcommand is forwarded verbatim (python main.py team-points --help).

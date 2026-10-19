@@ -5,7 +5,7 @@ import scraper.races as races_mod
 from scraper.races import (
     _parse_date_range, _parse_float, _parse_int, _parse_race_list, _parse_stage_date,
     _parse_stage_list_table, _resolve_stage_dates, _stage_options,
-    fetch_race_stages, normalize_race_href, stage_meta_from_soup,
+    fetch_race_stages, normalize_race_href, stage_meta_from_soup, gender_from_category, _detect_gender,
 )
 from scraper.utils import soup
 
@@ -162,6 +162,7 @@ STAGE4_INFO = """
 <div class="lineh16"><div class="bold mr5" style="display: inline-block;">Date</div>
 <div class="" style="display: inline-block;">7 July 2026</div><br/>
 <div class="bold mr5" style="display: inline-block;">Classification:</div><div>2.UWT</div><br/>
+<div class="bold mr5" style="display: inline-block;">Race category:</div><div>ME</div><br/>
 <div class="bold mr5" style="display: inline-block;">Distance:</div><div class="mr3">181.9</div><div>km</div><br/>
 <div class="bold mr5" style="display: inline-block;">Points scales: </div><div>GT.A.Stage</div><br/>
 <div class="bold mr5" style="display: inline-block;">Parcours type: </div>
@@ -181,7 +182,15 @@ class TestStageMeta:
         assert meta == {
             "date": "2026-07-07", "distance_km": 181.9, "elevation_m": 2784, "profile_type": "hilly",
             "gradient_final_km": 0.8, "profile_score": 108, "departure": "Carcassonne",
-            "arrival": "Foix", "race_class": "2.UWT", "points_scale": "GT.A.Stage"}
+            "arrival": "Foix", "race_class": "2.UWT", "points_scale": "GT.A.Stage", "race_category": "ME"}
+
+    def test_race_category_gives_the_gender(self):
+        # Tour El Salvador is in the men's calendar circuit with no marker in
+        # its name; its pages say "Race category: WE"
+        html = STAGE4_INFO.replace("<div>ME</div>", "<div>WE</div>")
+        assert gender_from_category(stage_meta_from_soup(soup(html))["race_category"]) == "women"
+        assert gender_from_category("ME") == "men" and gender_from_category("MU") == "men"
+        assert gender_from_category(None) is None and gender_from_category("") is None
 
     def test_profile_score_with_final_part(self):
         html = ('<div class="lineh16"><div class="bold mr5">Profile score:</div><div class="mr5">316</div>'
@@ -346,3 +355,18 @@ def test_find_race_alias_none_when_stored_slug_still_listed(monkeypatch):
 
 def test_is_missing_page_failed_fetch_is_not_missing():
     assert not races_mod.is_missing_page(None)
+
+
+def test_detect_gender_from_calendar_row():
+    # names and slugs of the women's races the men's circuits list (Oct 2026 DB)
+    assert _detect_gender("Vuelta CV Feminas", "1.Pro") == "women"
+    assert _detect_gender("La Choralis Fourmies Féminine", "1.Pro") == "women"
+    assert _detect_gender("Setmana Ciclista-Volta Comunitat Valenciana Fèmines", "2.Pro") == "women"
+    assert _detect_gender("Clasica de Almeria", "1.Pro", "race/clasica-de-almeria-we/2026") == "women"
+    assert _detect_gender("Veenendaal - Veenendaal", "1.Pro", "race/veenendaal-veenendaal-classic-we/2025") == "women"
+    assert _detect_gender("Strade Bianche", "1.WWT") == "women"
+    # no marker anywhere: only the result pages' race category tells
+    assert _detect_gender("Tour El Salvador", "2.1", "race/vuelta-el-salvador/2026") == "men"
+    # men's races stay men's ('we' only as a whole slug token)
+    assert _detect_gender("Tour de Pologne", "2.UWT", "race/tour-de-pologne/2026") == "men"
+    assert _detect_gender("Gran Premio Industria", "1.1", "race/gp-industria-artigianato-weiler/2026") == "men"

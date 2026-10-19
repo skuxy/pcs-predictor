@@ -228,20 +228,48 @@ def _parse_race_list(html: str, year: int, race_classes: list[str]) -> Iterator[
             "class": race_class,
             "country": _flag_country(cells[2]),
             "is_stage_race": 1 if is_stage else 0,
-            "gender": _detect_gender(link.get_text(strip=True), race_class),
+            "gender": _detect_gender(link.get_text(strip=True), race_class, slug),
         }
 
 
 _WOMEN_NAME_RE = re.compile(
-    r"\b(women|ladies|femina|femenina|féminin|vrouwen|dames|donne|femmes|mujeres)\b|\bWE\b",
+    r"\b(women|women's|ladies|femina|feminas|femenina|femenino|féminin|féminine|feminine|fèmines|femines"
+    r"|vrouwen|dames|donne|femmes|mujeres)\b|\bWE\b",
     re.IGNORECASE,
 )
+# PCS race slugs of women's editions: 'clasica-de-almeria-we', 'strade-bianche-donne',
+# 'vuelta-a-burgos-feminas', 'giro-dell-emilia-internazionale-donne-elite'
+_WOMEN_SLUG_RE = re.compile(r"(^|-)(we|women|donne|feminas|femenina|femmes|feminin|feminine|ladies)(-|$)")
 
-def _detect_gender(name: str, race_class: str) -> str:
-    """Return 'women' if the race name or class signals a women's event."""
+
+def gender_from_category(category: str | None) -> str | None:
+    """'women' / 'men' from a PCS "Race category" ('WE' Women Elite, 'ME' Men
+    Elite, 'MU' Men U23, 'WJ' ...), None when unknown."""
+    cat = (category or "").strip().upper()
+    if cat.startswith("W"):
+        return "women"
+    if cat.startswith("M"):
+        return "men"
+    return None
+
+
+def _detect_gender(name: str, race_class: str, slug: str | None = None) -> str:
+    """Return 'women' if the race name, slug or class signals a women's event.
+
+    Only a first guess from the calendar row: the men's calendar circuits
+    (16 above all) list women's races of the same classes (2.1, 1.Pro ...),
+    some with no marker in the name at all (Tour El Salvador, GP Oetingen,
+    GP Lucien Van Impe).  Every result page states the real one ("Race
+    category: WE"), and the scrape paths correct the stored gender from it
+    (main._sync_race_gender).
+    """
     if "WWT" in race_class:
         return "women"
     if _WOMEN_NAME_RE.search(name):
+        return "women"
+    name_part = (slug or "").strip("/").split("/")
+    name_part = name_part[1] if len(name_part) > 1 and name_part[0] == "race" else name_part[0]
+    if slug and _WOMEN_SLUG_RE.search(name_part):
         return "women"
     return "men"
 
@@ -263,8 +291,9 @@ def stage_meta_from_soup(s) -> dict:
     """Parse the race info block of a stage / one-day result page.
 
     Returns date (ISO), distance_km, elevation_m, profile_type,
-    gradient_final_km, profile_score, departure, arrival, race_class and
-    points_scale (e.g. 'GT.A.Stage', '1.WT.A'); missing fields are None.
+    gradient_final_km, profile_score, departure, arrival, race_class,
+    points_scale (e.g. 'GT.A.Stage', '1.WT.A') and race_category ('WE',
+    'ME', ...); missing fields are None.
     profile_type comes from the parcours icon (p1 flat, p2/p3 hilly, p4/p5
     mountain) unless "Won how" / the points scale ('GT.A.TTT', '2.WT.ITT')
     says (team) time trial.
@@ -300,6 +329,9 @@ def stage_meta_from_soup(s) -> dict:
         "arrival": info.get("arrival") or info.get("finish"),
         "race_class": info.get("classification"),
         "points_scale": points_scale,
+        # 'WE' (Women Elite), 'ME' (Men Elite), ...: the race's real gender,
+        # which the calendar row does not always show (gender_from_category)
+        "race_category": info.get("race category"),
     }
 
 

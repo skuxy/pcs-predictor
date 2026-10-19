@@ -163,13 +163,18 @@ python main.py backtest --race race/paris-nice/2026 --cutoff 2026-03-08
 
 # Fill in / repair results of finished races
 python main.py scrape-missing --year 2026 --min-results 5
-python main.py repair-points --year 2026
-python main.py refresh-stages --year 2026 --null-gaps --uci-mismatch   # re-sync stale stages (RUNBOOK)
+python main.py merge-riders --dry-run --plan-out /tmp/merge_plan.json   # riders PCS re-slugged (review the plan)
+python main.py merge-riders --from-plan /tmp/merge_plan.json            # ... then merge them
+python main.py repair-points --year 2026                                # also --year 2023/2024/2025
+python main.py refresh-stages --year 2026 --null-gaps --uci-mismatch --dup-positions   # re-sync stale stages (RUNBOOK)
+python main.py race-gender                                              # women's races stored as men's (page's race category)
 
 # Team UCI points: scrape, then build the weekly chart (options are passed through
 # to scripts/scrape_uci_points.py and scripts/team_points_report.py; add --help)
 python main.py scrape-uci-points --season 2026 --teams all
 python main.py team-points --season 2026 --top 30 --out-json out/tp.json --out-html out/team-points.html
+# one-off: drop the zero-point rider rows an older DB stored, then shrink the file (no PCS traffic)
+python main.py scrape-uci-points --prune-zero --all-seasons --vacuum
 ```
 
 See [RUNBOOK.md](RUNBOOK.md) for detailed recipes including sharing the database between machines, adding ProSeries races, and the full new-season pipeline.
@@ -191,8 +196,9 @@ pcs-predictor/
 │   └── gpx.py             # GPX file parsing & climb detection
 ├── db/
 │   ├── schema.sql         # SQLite schema
-│   ├── database.py        # upsert helpers
-│   └── uci_points.py      # team UCI points tables (ranking, breakdown, rider results, sanctions, spells)
+│   ├── database.py        # upsert helpers, UCI points sanity checks + repair
+│   ├── rider_merge.py     # re-slugged rider detection + merge, rider_slug_aliases (`main.py merge-riders`)
+│   └── uci_points.py      # team UCI points tables (ranking, breakdown, scoring rider results, scrapes, sanctions, spells)
 ├── analysis/
 │   ├── team_points.py     # weekly team ledger, jump detection + labels, chart payload
 │   └── team_points_chart.py # self-contained HTML chart for the payload
@@ -206,7 +212,7 @@ pcs-predictor/
 │   ├── predict.py         # inference (results-based + start-list-based)
 │   └── backtest.py        # evaluation metrics
 ├── tests/                 # pytest test suite
-├── data/cycling.db        # SQLite database (tracked in git, ~49 MB incl. the UCI points tables)
+├── data/cycling.db        # SQLite database (tracked in git, ~31 MB incl. the trimmed UCI points tables)
 ├── model/trained_model.pkl  # trained model (tracked in git)
 ├── model/metrics.json     # latest validation metrics
 ├── model/feature_names.json # feature column list
