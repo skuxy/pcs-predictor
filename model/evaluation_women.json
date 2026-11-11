@@ -1,0 +1,320 @@
+{
+ "stages": 213,
+ "rows": 24070,
+ "first_stage": "2025-01-17",
+ "last_stage": "2026-10-15",
+ "random_p_at_10": 0.0923,
+ "overall": {
+  "group": "all",
+  "stages": 213.0,
+  "p_at_10": 0.4854,
+  "hits3": 1.1643,
+  "win_top1": 0.3474,
+  "win_top3": 0.5822,
+  "win_top10": 0.7653,
+  "winner_rank_median": 3.0,
+  "auc": 0.8849,
+  "ndcg10": 0.5583
+ },
+ "by_profile": [
+  {
+   "group": "flat",
+   "stages": 47.0,
+   "p_at_10": 0.5234,
+   "hits3": 1.3404,
+   "win_top1": 0.5106,
+   "win_top3": 0.6809,
+   "win_top10": 0.766,
+   "winner_rank_median": 1.0,
+   "auc": 0.883,
+   "ndcg10": 0.6258
+  },
+  {
+   "group": "hilly",
+   "stages": 123.0,
+   "p_at_10": 0.4642,
+   "hits3": 1.0976,
+   "win_top1": 0.2927,
+   "win_top3": 0.5285,
+   "win_top10": 0.748,
+   "winner_rank_median": 3.0,
+   "auc": 0.8867,
+   "ndcg10": 0.5311
+  },
+  {
+   "group": "itt",
+   "stages": 14.0,
+   "p_at_10": 0.5214,
+   "hits3": 1.5,
+   "win_top1": 0.4286,
+   "win_top3": 0.8571,
+   "win_top10": 0.9286,
+   "winner_rank_median": 2.0,
+   "auc": 0.8779,
+   "ndcg10": 0.6107
+  },
+  {
+   "group": "mountain",
+   "stages": 24.0,
+   "p_at_10": 0.5417,
+   "hits3": 1.125,
+   "win_top1": 0.2917,
+   "win_top3": 0.5417,
+   "win_top10": 0.7917,
+   "winner_rank_median": 3.0,
+   "auc": 0.9062,
+   "ndcg10": 0.5876
+  },
+  {
+   "group": "unknown",
+   "stages": 5.0,
+   "p_at_10": 0.28,
+   "hits3": 0.4,
+   "win_top1": 0.2,
+   "win_top3": 0.4,
+   "win_top10": 0.6,
+   "winner_rank_median": 6.0,
+   "auc": 0.7751,
+   "ndcg10": 0.3056
+  }
+ ],
+ "by_tier": [
+  {
+   "group": ".1",
+   "stages": 59.0,
+   "p_at_10": 0.5034,
+   "hits3": 1.1695,
+   "win_top1": 0.2881,
+   "win_top3": 0.6102,
+   "win_top10": 0.7797,
+   "winner_rank_median": 3.0,
+   "auc": 0.8828,
+   "ndcg10": 0.5731
+  },
+  {
+   "group": "ProSeries",
+   "stages": 38.0,
+   "p_at_10": 0.4395,
+   "hits3": 1.1316,
+   "win_top1": 0.2632,
+   "win_top3": 0.5,
+   "win_top10": 0.7632,
+   "winner_rank_median": 3.5,
+   "auc": 0.8674,
+   "ndcg10": 0.5263
+  },
+  {
+   "group": "WorldTour",
+   "stages": 116.0,
+   "p_at_10": 0.4914,
+   "hits3": 1.1724,
+   "win_top1": 0.4052,
+   "win_top3": 0.5948,
+   "win_top10": 0.7586,
+   "winner_rank_median": 2.0,
+   "auc": 0.8916,
+   "ndcg10": 0.5612
+  }
+ ],
+ "by_race_type": [
+  {
+   "group": "one-day",
+   "stages": 54.0,
+   "p_at_10": 0.487,
+   "hits3": 1.1111,
+   "win_top1": 0.2963,
+   "win_top3": 0.463,
+   "win_top10": 0.6852,
+   "winner_rank_median": 4.0,
+   "auc": 0.8872,
+   "ndcg10": 0.5638
+  },
+  {
+   "group": "stage race",
+   "stages": 159.0,
+   "p_at_10": 0.4849,
+   "hits3": 1.1824,
+   "win_top1": 0.3648,
+   "win_top3": 0.6226,
+   "win_top10": 0.7925,
+   "winner_rank_median": 2.0,
+   "auc": 0.8841,
+   "ndcg10": 0.5564
+  }
+ ],
+ "by_year": [
+  {
+   "group": 2025,
+   "stages": 94.0,
+   "p_at_10": 0.45,
+   "hits3": 1.1809,
+   "win_top1": 0.2872,
+   "win_top3": 0.5,
+   "win_top10": 0.766,
+   "winner_rank_median": 3.5,
+   "auc": 0.8786,
+   "ndcg10": 0.5341
+  },
+  {
+   "group": 2026,
+   "stages": 119.0,
+   "p_at_10": 0.5134,
+   "hits3": 1.1513,
+   "win_top1": 0.395,
+   "win_top3": 0.6471,
+   "win_top10": 0.7647,
+   "winner_rank_median": 2.0,
+   "auc": 0.8898,
+   "ndcg10": 0.5774
+  }
+ ],
+ "hits10_distribution": {
+  "1": 6,
+  "2": 14,
+  "3": 22,
+  "4": 47,
+  "5": 52,
+  "6": 38,
+  "7": 20,
+  "8": 9,
+  "9": 4,
+  "10": 1
+ },
+ "calibration": {
+  "brier": 0.0585858525231802,
+  "log_loss": 0.19969849130251974,
+  "ece": 0.00549086806029346,
+  "mean_prob_sum_per_stage": 10.004599735036544,
+  "reliability": [
+   {
+    "bin": "0.0\u20130.1",
+    "n": 17874,
+    "predicted": 0.0239,
+    "actual": 0.0205
+   },
+   {
+    "bin": "0.1\u20130.2",
+    "n": 2778,
+    "predicted": 0.1421,
+    "actual": 0.1429
+   },
+   {
+    "bin": "0.2\u20130.3",
+    "n": 1358,
+    "predicted": 0.2466,
+    "actual": 0.243
+   },
+   {
+    "bin": "0.3\u20130.4",
+    "n": 810,
+    "predicted": 0.347,
+    "actual": 0.3543
+   },
+   {
+    "bin": "0.4\u20130.5",
+    "n": 518,
+    "predicted": 0.4481,
+    "actual": 0.4884
+   },
+   {
+    "bin": "0.5\u20130.6",
+    "n": 330,
+    "predicted": 0.5494,
+    "actual": 0.6121
+   },
+   {
+    "bin": "0.6\u20130.7",
+    "n": 245,
+    "predicted": 0.6421,
+    "actual": 0.6857
+   },
+   {
+    "bin": "0.7\u20130.8",
+    "n": 115,
+    "predicted": 0.7413,
+    "actual": 0.7739
+   },
+   {
+    "bin": "0.8\u20130.9",
+    "n": 29,
+    "predicted": 0.8384,
+    "actual": 0.8621
+   },
+   {
+    "bin": "0.9\u20131.0",
+    "n": 13,
+    "predicted": 0.9332,
+    "actual": 1.0
+   }
+  ]
+ },
+ "baselines": [
+  {
+   "group": "Top-10 rate, last 90 days",
+   "short": "form 90d",
+   "stages": 213.0,
+   "p_at_10": 0.4113,
+   "hits3": 0.8169,
+   "win_top1": 0.1831,
+   "win_top3": 0.3944,
+   "win_top10": 0.723,
+   "winner_rank_median": 5.0,
+   "auc": 0.7742,
+   "ndcg10": 0.4465
+  },
+  {
+   "group": "PCS points, last 365 days",
+   "short": "points 365d",
+   "stages": 213.0,
+   "p_at_10": 0.4047,
+   "hits3": 0.9437,
+   "win_top1": 0.277,
+   "win_top3": 0.5117,
+   "win_top10": 0.7653,
+   "winner_rank_median": 3.0,
+   "auc": 0.8264,
+   "ndcg10": 0.4754
+  },
+  {
+   "group": "Elo rating (all stages)",
+   "short": "Elo",
+   "stages": 213.0,
+   "p_at_10": 0.4268,
+   "hits3": 0.9061,
+   "win_top1": 0.216,
+   "win_top3": 0.4507,
+   "win_top10": 0.6948,
+   "winner_rank_median": 4.0,
+   "auc": 0.8541,
+   "ndcg10": 0.4738
+  }
+ ],
+ "config": {
+  "gender": "women",
+  "folds": [
+   "2025-01-01",
+   "2025-04-01",
+   "2025-07-01",
+   "2026-01-01",
+   "2026-04-01",
+   "2026-07-01"
+  ],
+  "targets": [
+   "top10",
+   "top3",
+   "win"
+  ],
+  "n_features": 173,
+  "model": {
+   "type": "HistGradientBoostingClassifier \u00d7 5, isotonic-calibrated",
+   "max_iter": 400,
+   "learning_rate": 0.05,
+   "max_leaf_nodes": 31,
+   "max_depth": null,
+   "min_samples_leaf": 40,
+   "max_features": 0.7,
+   "l2_regularization": 1.0
+  },
+  "generated": "2026-11-11"
+ }
+}

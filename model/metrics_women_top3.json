@@ -1,0 +1,9 @@
+{
+  "train_cutoff": "2026-10-16",
+  "last_training_stage": "2026-10-15",
+  "gender": "women",
+  "target": "top3",
+  "train_rows": 50777,
+  "train_stages": 450,
+  "n_features": 173
+}
