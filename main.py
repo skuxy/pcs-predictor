@@ -350,7 +350,18 @@ def cmd_train(args):
     from model.stage_classifier import train as train_stage_clf
     from model.train import train
     train_stage_clf(cutoff_date=args.cutoff)
-    train(train_cutoff=args.cutoff, val_race_slug=args.val_race, gender=args.gender, target=getattr(args, 'target', 'top10'))
+    train(train_cutoff=args.cutoff, val_race_slug=args.val_race, gender=args.gender,
+          target=getattr(args, 'target', 'all'))
+
+
+def cmd_evaluate(args):
+    """Walk-forward evaluation: score past stages with models that never saw them."""
+    from model.evaluate import DEFAULT_FOLDS, evaluate, format_report
+    folds = tuple(_csv(args.folds)) or DEFAULT_FOLDS
+    targets = ("top10",) if args.top10_only else ("top10", "top3", "win")
+    rep = evaluate(gender=args.gender, folds=folds, targets=targets, save=not args.no_save)
+    print(format_report(rep, f"Walk-forward evaluation ({args.gender}): every stage predicted by models "
+                             f"trained on earlier stages only"))
 
 
 def cmd_backtest(args):
@@ -435,6 +446,7 @@ def cmd_scrape_elevation(args):
     log.info("elevation backfill complete: %d/%d updated", updated, len(rows))
 
     # ── backfill gradient_final_km / profile_score / profile_type ─────────────
+    # (also corrects the default 'mountain' label of stages whose page was never read)
     with get_conn() as conn:
         grad_rows = conn.execute(
             """SELECT id, pcs_slug FROM stages
@@ -449,10 +461,18 @@ def cmd_scrape_elevation(args):
         if meta.get("gradient_final_km") is not None or meta.get("profile_score") is not None:
             with get_conn() as conn:
                 conn.execute(
+                    # A stage stored as 'mountain' with no profile score and no
+                    # distance carries the stage-list default, not a label read
+                    # from its page: the page's profile replaces it.
                     """UPDATE stages SET
                        gradient_final_km = COALESCE(?, gradient_final_km),
                        profile_score     = COALESCE(?, profile_score),
-                       profile_type      = COALESCE(profile_type, ?)
+                       profile_type      = CASE
+                           WHEN profile_type IS NULL
+                             OR (profile_type = 'mountain' AND profile_score IS NULL
+                                 AND COALESCE(distance_km, 0) = 0)
+                           THEN COALESCE(?, profile_type)
+                           ELSE profile_type END
                        WHERE id = ?""",
                     (meta.get("gradient_final_km"), meta.get("profile_score"),
                      meta.get("profile_type"), row["id"]),
@@ -1172,18 +1192,33 @@ def main(argv=None):
                           help="Which calendar to scrape (default: men)")
     p_scrape.set_defaults(func=cmd_scrape)
 
-    p_train = sub.add_parser("train", help="Train the prediction model")
-    p_train.add_argument("--cutoff", default="2024-05-04",
-                         help="Train on data before this date (default: Giro 2024 start)")
-    p_train.add_argument("--val-race", default="race/giro-d-italia/2024")
+    p_train = sub.add_parser("train", help="Train the prediction models")
+    p_train.add_argument("--cutoff", default=None,
+                         help="Train on stages before this date (default: every stored result)")
+    p_train.add_argument("--val-race", default=None,
+                         help="Race on or after the cutoff to score the new model on (optional)")
     p_train.add_argument("--gender", default="men", choices=["men", "women"])
-    p_train.add_argument("--target", default="top10", choices=["top10", "top3", "win"],
-                         help="Prediction target: top10 (default), top3, or win")
+    p_train.add_argument("--target", default="all", choices=["all", "top10", "top3", "win"],
+                         help="Which finish threshold to train for (default: all three)")
     p_train.set_defaults(func=cmd_train)
+
+    p_eval = sub.add_parser(
+        "evaluate",
+        help="Walk-forward accuracy on past races (models never see the stages they are scored on)",
+    )
+    p_eval.add_argument("--gender", default="men", choices=["men", "women"])
+    p_eval.add_argument("--folds", help="Comma-separated start dates of the test windows "
+                                        "(default: 2025-01-01,2025-04-01,2025-07-01,2026-01-01,2026-04-01,2026-07-01)")
+    p_eval.add_argument("--top10-only", action="store_true", dest="top10_only",
+                        help="Skip the podium and win models (three times faster)")
+    p_eval.add_argument("--no-save", action="store_true", dest="no_save",
+                        help="Print only; do not write model/evaluation*.json and model/walkforward*.csv.gz")
+    p_eval.set_defaults(func=cmd_evaluate)
 
     p_bt = sub.add_parser("backtest", help="Backtest against a historic race")
     p_bt.add_argument("--race",   default="race/giro-d-italia/2024")
-    p_bt.add_argument("--cutoff", default="2024-05-04")
+    p_bt.add_argument("--cutoff", default=None,
+                      help="First stage date to predict (default: the race start)")
     p_bt.add_argument("--top-n",  type=int, default=10, dest="top_n")
     p_bt.add_argument("--gender", default="men", choices=["men", "women"])
     p_bt.set_defaults(func=cmd_backtest)

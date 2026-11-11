@@ -3,7 +3,12 @@ Backtest: compare model predictions to actual results for a historic race.
 
 Usage
 ─────
-  python -m model.backtest --race race/giro-d-italia/2024 --cutoff 2024-05-04
+  python main.py backtest --race race/giro-d-italia/2026
+
+A race covered by the last `python main.py evaluate` run is shown with its
+saved walk-forward predictions (models that never saw it).  Any other race is
+predicted by the model on disk, and the header says whether that model was
+trained on the race.
 
 Outputs
 ───────
@@ -22,13 +27,25 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score, average_precision_score
 
-from model.predict import predict_race
+from model.predict import backtest_predictions, model_info, SOURCE_SEEN, SOURCE_WALK_FORWARD
 
 log = logging.getLogger(__name__)
 
 
-def backtest(race_slug: str, cutoff_date: str, top_n: int = 10, gender: str = "men") -> None:
-    df = predict_race(race_slug, cutoff_date, gender=gender)
+def source_note(source: str, gender: str = "men") -> str:
+    """One line on how far a backtest's numbers can be trusted."""
+    if source == SOURCE_WALK_FORWARD:
+        return "out of sample: walk-forward predictions, models trained only on earlier stages"
+    info = model_info(gender)
+    trained_to = info.get("last_training_stage", info.get("train_cutoff", "?"))
+    if source == SOURCE_SEEN:
+        return (f"IN SAMPLE: the current model was trained on this race (results up to {trained_to}) — "
+                f"these numbers flatter it; run `python main.py evaluate` for honest ones")
+    return f"out of sample: the race is after the last result the current model was trained on ({trained_to})"
+
+
+def backtest(race_slug: str, cutoff_date: str | None = None, top_n: int = 10, gender: str = "men") -> None:
+    df, source = backtest_predictions(race_slug, gender, cutoff_date)
     if df.empty:
         print("No data — check that the race is in the database.")
         return
@@ -38,7 +55,7 @@ def backtest(race_slug: str, cutoff_date: str, top_n: int = 10, gender: str = "m
 
     print(f"\n{'='*70}")
     print(f"  BACKTEST: {race_slug}")
-    print(f"  Training cutoff: {cutoff_date}  |  Stages: {known['stage_date'].nunique()}")
+    print(f"  Stages: {known['stage_date'].nunique()}  |  {source_note(source, gender)}")
     print(f"{'='*70}\n")
 
     stage_metrics = []
@@ -136,8 +153,8 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     parser = argparse.ArgumentParser()
     parser.add_argument("--race",    default="race/giro-d-italia/2024")
-    parser.add_argument("--cutoff",  default="2024-05-04",
-                        help="Race start date — no data after this used for features")
+    parser.add_argument("--cutoff",  default=None,
+                        help="First stage date to predict (default: the race start)")
     parser.add_argument("--top-n",   type=int, default=10)
     parser.add_argument("--gender",  default="men", choices=["men", "women"])
     args = parser.parse_args()

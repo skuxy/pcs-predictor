@@ -67,3 +67,49 @@ def test_team_points_end_to_end_missing_tables(tmp_path, capsys):
     assert exc.value.code == 1
     assert "no uci_team_totals" in capsys.readouterr().err
     assert _tables(db) == set()
+
+
+def test_scrape_elevation_replaces_the_unread_mountain_default(tmp_path, monkeypatch):
+    """A stage that only came from the stage list is stored as 'mountain' with
+    distance 0; the backfill takes its profile from the stage page.  A label
+    that was read from a page is never overwritten."""
+    import argparse
+    from db import database
+    import scraper.races as races
+
+    path = str(tmp_path / "c.db")
+    init_db(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("INSERT INTO races (id, pcs_slug, name, year, start_date, end_date, class, is_stage_race) "
+                     "VALUES (1, 'race/tour-of-belgium/2026', 'Tour of Belgium', 2026, '2026-06-17', '2026-06-18', '2.Pro', 1)")
+        conn.execute("INSERT INTO stages (id, race_id, stage_num, pcs_slug, date, distance_km, elevation_m, profile_type) "
+                     "VALUES (1, 1, 1, 'race/tour-of-belgium/2026/stage-1', '2026-06-17', 0, 500, 'mountain')")
+        conn.execute("INSERT INTO stages (id, race_id, stage_num, pcs_slug, date, distance_km, elevation_m, profile_type) "
+                     "VALUES (2, 1, 2, 'race/tour-of-belgium/2026/stage-2', '2026-06-18', 181.5, 2900, 'mountain')")
+        conn.commit()
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _conn(db_path=path):
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
+
+    monkeypatch.setattr(database, "get_conn", _conn)
+    monkeypatch.setattr(races, "fetch_stage_elevation", lambda slug: None)
+    monkeypatch.setattr(races, "fetch_race_stages", lambda slug: [])
+    monkeypatch.setattr(races, "fetch_result_meta",
+                        lambda slug: {"gradient_final_km": 0.4, "profile_score": 12, "profile_type": "flat"})
+
+    main.cmd_scrape_elevation(argparse.Namespace())
+
+    with sqlite3.connect(path) as conn:
+        rows = dict(conn.execute("SELECT id, profile_type FROM stages"))
+        scores = dict(conn.execute("SELECT id, profile_score FROM stages"))
+    assert rows == {1: "flat", 2: "mountain"}       # stage 2 had a distance: its label was read from a page
+    assert scores == {1: 12, 2: 12}

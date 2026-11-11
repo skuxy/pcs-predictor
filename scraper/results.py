@@ -559,11 +559,15 @@ def _ttt_time_seconds(raw: str) -> float | None:
 def _rider_slug(link) -> str:
     """'rider/tom-pidcock' -> 'tom-pidcock'; '' for PCS's empty placeholder
     link ``<a href="rider/"></a>`` (a nameless DNF row, San Juan 2023 stage 4),
-    which earlier parses stored as a rider called 'rider'."""
+    which earlier parses stored as a rider called 'rider'.
+
+    Since autumn 2026 PCS links riders with results in several disciplines as
+    ``rider/rein-taaramae/road``; the discipline is not part of the slug (kept,
+    it created a second rider 'rein-taaramae/road' without any history)."""
     href = link.get("href", "").strip().strip("/")
     if "rider/" not in href:
         return ""
-    return href.split("rider/", 1)[-1].split("?")[0].strip("/")
+    return href.split("rider/", 1)[-1].split("?")[0].strip("/").split("/")[0]
 
 
 def _team_from_link(link) -> tuple[str | None, str | None]:

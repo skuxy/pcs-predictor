@@ -121,8 +121,9 @@ def _rider_id_data_map() -> dict:
 
 def _race_cutoff(race) -> str:
     """
-    For races already in progress, use start_date as cutoff so build_features()
-    returns empty and predict_from_startlist() handles all stages.
+    For a race under way, start from its first day: predict_race() takes the
+    ridden stages from their results and the open ones from the start list
+    (the card then shows the stages still to come).
     For future races, use today.
     """
     if race["start_date"] and race["start_date"] < TODAY_STR:
@@ -152,6 +153,14 @@ def _model_metrics(gender: str = "men") -> dict:
     mpath = ROOT / mpath
     if mpath.exists():
         return json.loads(mpath.read_text())
+    return {}
+
+
+def _evaluation(gender: str = "men") -> dict:
+    from model.evaluate import evaluation_path
+    path = ROOT / evaluation_path(gender)
+    if path.exists():
+        return json.loads(path.read_text())
     return {}
 
 
@@ -423,10 +432,25 @@ def _accuracy_section(metrics_m: dict, metrics_w: dict, recent_m, recent_w, stat
             boxes_acc.append(metric_box(f'{metrics["train_rows"]:,}', "Train rows", suffix))
         if metrics.get("n_features"):
             boxes_acc.append(metric_box(str(metrics["n_features"]), "Features", suffix))
-        if metrics.get("train_cutoff"):
-            boxes_acc.append(metric_box(metrics["train_cutoff"], "Last trained", suffix))
+        trained_to = metrics.get("last_training_stage") or metrics.get("train_cutoff")
+        if trained_to:
+            boxes_acc.append(metric_box(trained_to, "Trained on results up to", suffix))
+
+    def _add_evaluation(gender: str, boxes_acc: list) -> bool:
+        """Walk-forward accuracy saved by `python main.py evaluate`."""
+        ev = _evaluation(gender)
+        if not ev:
+            return False
+        o = ev["overall"]
+        sub = f'{gender} · {ev["stages"]} stages, walk-forward'
+        boxes_acc.append(metric_box(f'{o["p_at_10"] * 10:.2f} / 10', "Top-10 hits per stage", sub))
+        boxes_acc.append(metric_box(f'{o["win_top1"]:.0%}', "Winner called", sub))
+        boxes_acc.append(metric_box(f'{o["win_top3"]:.0%}', "Winner in top 3 picks", sub))
+        return True
 
     boxes_list: list = []
+    has_eval = _add_evaluation("men", boxes_list)
+    has_eval = _add_evaluation("women", boxes_list) or has_eval
     _add_boxes(metrics_m, "men",   boxes_list)
     _add_boxes(metrics_w, "women", boxes_list)
 
@@ -434,9 +458,9 @@ def _accuracy_section(metrics_m: dict, metrics_w: dict, recent_m, recent_w, stat
     for tbl, cnt in stats.items():
         boxes_list.append(metric_box(f'{cnt:,}', tbl.capitalize()))
 
-    # Placeholders if no metrics at all
-    if not any(metrics_m.get(k) for k in ("val_auc", "val_ap")):
-        boxes_list.insert(0, metric_box("n/a", "Val AUC", "run train --val-race"))
+    # Placeholder if no accuracy figure at all
+    if not has_eval and not any(metrics_m.get(k) for k in ("val_auc", "val_ap")):
+        boxes_list.insert(0, metric_box("n/a", "Accuracy", "run main.py evaluate"))
 
     boxes = "".join(boxes_list)
 
