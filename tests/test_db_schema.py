@@ -827,3 +827,66 @@ def test_race_alias_rejects_another_stored_race(cli_db, monkeypatch):
     monkeypatch.setattr(main, "fetch", lambda url, use_cache=True: "<html><head></head><body></body></html>")
     monkeypatch.setattr(main, "find_race_alias", lambda *a, **k: "race/gp-clean/2026")
     assert main._race_alias(4, "race/stage-race/2026") is None
+
+
+def test_scrape_trusts_only_pages_fetched_after_the_stage(cli_db, monkeypatch):
+    """The result of a stage is asked for inside pages_newer_than(stage date):
+    a copy cached before the stage was ridden shows the start list and would
+    be read as a cancelled stage for ever.  In the two weeks after a stage a
+    copy from before today is not trusted either (PCS enters some results
+    late).  A stage still to come is not fetched at all."""
+    import datetime
+    from scraper import utils
+
+    def stage(slug, num, date):
+        return {"pcs_slug": slug, "stage_num": num, "date": date, "distance_km": None, "elevation_m": None,
+                "profile_type": "hilly", "surface": "road", "departure": None, "arrival": None, "gpx_path": None}
+
+    today = datetime.date.today()
+    three_days_ago, yesterday, tomorrow = [(today + datetime.timedelta(days=d)).isoformat() for d in (-3, -1, 1)]
+    with _conn(cli_db) as conn:
+        conn.execute("""INSERT INTO races (id, pcs_slug, name, year, start_date, end_date, class, is_stage_race, gender)
+                        VALUES (50, 'race/under-way/2026', 'Under Way', 2026, ?, ?, '2.1', 1, 'men')""",
+                     (three_days_ago, tomorrow))
+    stage_lists = {
+        "race/stage-race/2026": [stage("race/stage-race/2026/stage-1", 1, "2026-05-01"),
+                                 stage("race/stage-race/2026/stage-2", 2, "2026-05-02")],
+        "race/under-way/2026": [stage("race/under-way/2026/stage-1", 1, three_days_ago),
+                                stage("race/under-way/2026/stage-2", 2, yesterday),
+                                stage("race/under-way/2026/stage-3", 3, tomorrow)],
+    }
+    seen = {}
+
+    def fake_stages(slug):
+        seen["overview:" + slug] = utils._stale_through
+        return stage_lists.get(slug, [])
+
+    def fake_results(slug):
+        seen[slug] = utils._stale_through
+        return [_row("tadej-pogacar", 1, 14)]
+
+    def fake_meta(slug):
+        seen["meta:" + slug] = utils._stale_through
+        return {}
+
+    monkeypatch.setattr(main, "fetch_race_stages", fake_stages)
+    monkeypatch.setattr(main, "fetch_stage_results", fake_results)
+    monkeypatch.setattr(main, "fetch_stage_meta", fake_meta)
+
+    # a race that finished long ago (the stages of May 2026)
+    args = argparse.Namespace(year=2026, gender="men", races="race/stage-race/2026", min_results=1,
+                              backfill_teams=False)
+    main.cmd_scrape_missing(args)
+    assert seen["race/stage-race/2026/stage-2"] == "2026-05-02"        # the stage's own day
+    assert seen["meta:race/stage-race/2026/stage-2"] == "2026-05-02"
+    assert seen["overview:race/stage-race/2026"] == "2026-05-02"        # the race's last day
+
+    # a race under way: the ridden stages are fetched, tomorrow's is not asked for
+    assert main._scrape_race_results(50, "race/under-way/2026", skip_riders=True) == 2
+    assert seen["race/under-way/2026/stage-1"] == yesterday             # three days old: a copy from before today is not enough
+    assert seen["race/under-way/2026/stage-2"] == yesterday
+    assert "race/under-way/2026/stage-3" not in seen
+    assert seen["overview:race/under-way/2026"] is None                 # its stage list may still change: cache as usual
+    with _conn(cli_db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM stages WHERE race_id = 50").fetchone()[0] == 3
+    assert utils._stale_through is None                                 # nothing leaks out of the blocks

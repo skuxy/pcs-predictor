@@ -119,6 +119,34 @@ OUTCOME_MIX_COLS = [
     "elo_exp", "elo_exp_frank", "elo_exp_gap", "team_rank_elo_exp",
 ]
 
+# Results on stages like this one: every earlier result weighted by how close
+# that stage's profile score (and, for simg_*, the gradient of its final km)
+# was to the target stage's.  A continuous version of RELEVANT_COLS, which
+# only know flat / hilly / mountain.
+SIMILAR_STAGE_COLS = [
+    "sim_pct", "sim_top10", "sim_pts", "sim_n",
+    "simg_pct", "simg_top10", "simg_pts", "simg_n",
+    "sim_pct_frank", "sim_pts_frank", "simg_pct_frank",
+]
+
+# "Stages like this one" kernels: (name, also match the final-km gradient).
+SIM_KERNELS = (("sim", False), ("simg", True))
+SIM_PROFILE_BANDWIDTH = 2.0     # in square roots of the profile score: 100 vs 64 is one width
+SIM_GRADIENT_BANDWIDTH = 2.5    # percent of final-km gradient
+SIM_HALF_LIFE_DAYS = 365
+SIM_WINDOW_DAYS = 730
+# What a typical stage of each profile icon looks like (medians of the stored
+# stages): the stand-in for a route PCS has not published yet, or whose page
+# could not be read.  Without it such a stage loses a whole top-10 hit
+# (results/accuracy_2026-11.md, round 6); with it about 0.4.
+ROUTE_DEFAULTS = {
+    "flat":     {"profile_score": 10.0, "gradient_final_km": 0.3, "elevation_per_km": 5.0},
+    "hilly":    {"profile_score": 85.0, "gradient_final_km": 1.1, "elevation_per_km": 12.6},
+    "mountain": {"profile_score": 220.0, "gradient_final_km": 5.2, "elevation_per_km": 19.6},
+    "itt":      {"profile_score": 8.0, "gradient_final_km": 0.6, "elevation_per_km": 9.5},
+    "ttt":      {"profile_score": 8.0, "gradient_final_km": 0.6, "elevation_per_km": 7.0},
+}
+
 # Rider-page facts as of the day the profile was scraped, not of the race:
 # pcs_rank (empty in today's database) and the speciality PCS derives from
 # career points.  Used for a 2024 stage they would be a look into the future,
@@ -128,7 +156,7 @@ _NOT_POINT_IN_TIME = {"pcs_rank"} | {f"spec_{sp}" for sp in SPECIALITIES}
 
 FEATURE_COLS = [c for c in (
     LEGACY_FEATURE_COLS + STRENGTH_COLS + RELEVANT_COLS + FINISH_TYPE_COLS
-    + RACE_HISTORY_COLS + TEAM_COLS + FIELD_COLS + RATING_COLS + OUTCOME_MIX_COLS
+    + RACE_HISTORY_COLS + TEAM_COLS + FIELD_COLS + RATING_COLS + OUTCOME_MIX_COLS + SIMILAR_STAGE_COLS
 ) if c not in _NOT_POINT_IN_TIME]
 
 KEY = ["rider_id", "stage_id"]
@@ -352,12 +380,226 @@ def attach_stage_outcome(base: pd.DataFrame, stage_clf="disk") -> pd.DataFrame:
     return base
 
 
+# Most (target row, earlier result) pairs handled in one piece.  The pairs
+# frame is the memory peak of a feature build (about 0.4 GB per million pairs);
+# riders are processed in groups that stay under this bound.
+MAX_PAIRS_PER_CHUNK = 4_000_000
+
+
+def _rider_chunks(targets: pd.DataFrame, hist: pd.DataFrame, max_pairs: int) -> list[np.ndarray]:
+    """Groups of rider ids whose (target rows × results) products add up to
+    about ``max_pairs`` at most (a rider above the bound stays in one group)."""
+    n_targets = targets.groupby("rider_id").size()
+    n_hist = hist.groupby("rider_id").size().reindex(n_targets.index).fillna(0)
+    cost = (n_targets * n_hist).sort_index()
+    group = (cost.cumsum() // max(max_pairs, 1)).astype(int)
+    return [g.index.to_numpy() for _, g in cost.groupby(group)]
+
+
+def _history_features(targets: pd.DataFrame, hist: pd.DataFrame) -> pd.DataFrame:
+    """Rolling features of each target row from that rider's earlier results.
+
+    One row per (target rider-stage, earlier result of that rider) is built
+    (``_history_pairs``); every feature is a masked group-by over that frame.
+    Returns one row per target that has any earlier result, indexed by
+    (rider_id, stage_id).
+    """
+    joined = _history_pairs(targets, hist)
+    dd = joined["_day_delta"].to_numpy()
+    # TTT results reflect team performance, not individual ability — exclude
+    # them from general rolling form so they don't inflate/distort rider metrics.
+    not_ttt = (joined["hist_profile"] != "ttt").to_numpy()
+
+    frames: list[pd.DataFrame] = []
+
+    def add(mask, **aggs) -> None:
+        """Group-by aggregates of the history rows under ``mask``, one row per target."""
+        cols = sorted({src for src, _ in aggs.values()})
+        sub = joined.loc[mask, KEY + cols] if mask is not None else joined[KEY + cols]
+        frames.append(sub.groupby(KEY, sort=False).agg(**aggs))
+
+    add(not_ttt & (dd <= 30), avg_pos_30d=("position", "mean"), top10_rate_30d=("is_top10", "mean"),
+        races_last_30d=("hist_stage_id", "count"))
+    add(not_ttt & (dd <= 60), avg_pos_60d=("position", "mean"))
+    add(not_ttt & (dd <= 90), avg_pos_90d=("position", "mean"), top10_rate_90d=("is_top10", "mean"),
+        win_rate_90d=("is_win", "mean"), dnf_rate_90d=("is_dnf", "mean"),
+        pts_90d=("pts", "sum"), pct_mean_90d=("pct", "mean"))
+    add(not_ttt, _last_race=("hist_date", "max"), n_results_all=("hist_stage_id", "size"))
+
+    # ── profile affinity ──────────────────────────────────────────────────────
+    prof = {pt: (joined["hist_profile"] == pt).to_numpy() for pt in ("mountain", "flat", "hilly", "itt")}
+    add(prof["mountain"], mountain_avg_pos=("position", "mean"))
+    add(prof["flat"], flat_avg_pos=("position", "mean"))
+    add(prof["hilly"], hilly_avg_pos=("position", "mean"))
+    # ITT win rate (all-time) — highly distinctive for pure TT specialists
+    add(prof["itt"], tt_avg_pos=("position", "mean"), tt_win_rate=("is_win", "mean"))
+
+    # ── profile-specific rolling features ─────────────────────────────────────
+    for pt, name in (("hilly", "hilly"), ("mountain", "mountain"), ("flat", "flat")):
+        add(prof[pt] & (dd <= 30), **{f"{name}_avg_pos_30d": ("position", "mean")})
+        add(prof[pt] & (dd <= 90), **{f"{name}_avg_pos_90d": ("position", "mean"),
+                                      f"{name}_top10_rate_90d": ("is_top10", "mean")})
+    add(prof["itt"] & (dd <= 90), tt_avg_pos_90d=("position", "mean"))
+    add(prof["itt"] & (dd <= 365), tt_avg_pos_365d=("position", "mean"), tt_top10_rate_365d=("is_top10", "mean"))
+
+    # ── relevant-stage rolling (profile + surface matched) ─────────────────────
+    is_special = joined["target_surface"].isin(["cobbled", "gravel"]).to_numpy()
+    surface_match = (~is_special) | (joined["hist_surface"] == joined["target_surface"]).to_numpy()
+    rel = (joined["hist_profile"] == joined["target_profile"]).to_numpy() & surface_match
+    del is_special, surface_match
+
+    add(rel & (dd <= 30), relevant_avg_pos_30d=("position", "mean"))
+    add(rel & (dd <= 90), relevant_avg_pos_90d=("position", "mean"), relevant_top10_rate_90d=("is_top10", "mean"))
+    add(rel & (dd <= 365), relevant_avg_pos_365d=("position", "mean"),
+        relevant_top10_rate_365d=("is_top10", "mean"))
+
+    # ── fatigue: calendar days raced ──────────────────────────────────────────
+    add(dd <= 7, race_days_last_7d=("hist_date", "nunique"))
+    add(dd <= 14, race_days_last_14d=("hist_date", "nunique"))
+
+    # ── breakaway propensity ──────────────────────────────────────────────────
+    # Top-10s scored while starting the stage >20th on GC come from breakaways,
+    # not the favourites' group — a distinct skill the form features miss.
+    add(not_ttt & (joined["hist_gc_rank"] > 20).to_numpy() & (dd <= 365),
+        break_top10_rate_365d=("is_top10", "mean"), break_top10s_365d=("is_top10", "sum"))
+
+    # ── punch-finish affinity ─────────────────────────────────────────────────
+    # Hilly stages with steep final km (>=5%) are classics/puncher territory,
+    # distinct from GC-style mountain stages or lumpy breakaway stages.
+    add(not_ttt & prof["hilly"] & (joined["hist_gradient"].fillna(0) >= 5.0).to_numpy() & (dd <= 90),
+        punch_top10_rate_90d=("is_top10", "mean"), punch_avg_pos_90d=("position", "mean"))
+
+    # ── one-day race form (breakaway proxy) ───────────────────────────────────
+    # Riders who succeed in one-day races perform similarly in GT breakaways:
+    # both require attacking from a non-GC position and staying away.
+    oneday = not_ttt & ~joined["hist_is_stage_race"].to_numpy()
+    add(oneday & (dd <= 365), oneday_top10_rate_365d=("is_top10", "mean"))
+    add(oneday & (dd <= 90), oneday_avg_pos_90d=("position", "mean"))
+    del oneday
+
+    # ══ point-in-time strength, finish-type skills, race history ══════════════
+
+    # Recency-weighted level (half-life 45 days) and points (half-life 120 days)
+    w_form = np.power(0.5, dd / 45.0)
+    pct = joined["pct"].to_numpy(dtype=np.float64)
+    ewm = pd.DataFrame({
+        "rider_id": joined["rider_id"].to_numpy()[not_ttt], "stage_id": joined["stage_id"].to_numpy()[not_ttt],
+        "_pct_w": (pct * w_form)[not_ttt], "_w": np.where(np.isnan(pct), np.nan, w_form)[not_ttt],
+        "_pts_w": (joined["pts"].to_numpy(dtype=np.float64) * np.power(0.5, dd / 120.0))[not_ttt],
+    })
+    e = ewm.groupby(KEY, sort=False).agg(_pct_w=("_pct_w", "sum"), _w=("_w", "sum"), pts_ewm=("_pts_w", "sum"))
+    e["pct_ewm"] = (e["_pct_w"] / e["_w"]).where(e["_w"] > 0)
+    frames.append(e[["pct_ewm", "pts_ewm"]])
+    del ewm, e, w_form, pct
+
+    add(not_ttt & (dd <= 365),
+        pts_365d=("pts", "sum"), pct_mean_365d=("pct", "mean"),
+        top3_rate_365d=("is_top3", "mean"), top10_rate_365d=("is_top10", "mean"),
+        wins_365d=("is_win", "sum"), best_pos_365d=("position", "min"),
+        n_results_365d=("hist_stage_id", "size"), tier_mean_365d=("tier_w", "mean"))
+    add(not_ttt & (dd <= 730), pts_730d=("pts", "sum"))
+
+    rel_ind = rel & not_ttt
+    add(rel_ind & (dd <= 365), rel_pts_365d=("pts", "sum"), rel_pct_mean_365d=("pct", "mean"))
+    add(rel_ind & (dd <= 730),
+        rel_pts_730d=("pts", "sum"), rel_top3_rate_730d=("is_top3", "mean"),
+        rel_best_pos_730d=("position", "min"), rel_n_730d=("hist_stage_id", "size"))
+
+    bunch = not_ttt & (joined["hist_finish"] == "bunch").to_numpy()
+    select = not_ttt & (joined["hist_finish"] == "select").to_numpy()
+    add(bunch & (dd <= 730),
+        bunch_top10_rate_730d=("is_top10", "mean"), bunch_top3_rate_730d=("is_top3", "mean"),
+        bunch_pts_730d=("pts", "sum"), bunch_n_730d=("hist_stage_id", "size"))
+    add(bunch & (dd <= 365), bunch_pct_mean_365d=("pct", "mean"))
+    add(select & (dd <= 730),
+        select_top10_rate_730d=("is_top10", "mean"), select_pts_730d=("pts", "sum"),
+        select_n_730d=("hist_stage_id", "size"))
+    add(select & (dd <= 365), select_pct_mean_365d=("pct", "mean"))
+    add(not_ttt & (joined["hist_gradient"].fillna(0) >= 4.0).to_numpy() & (dd <= 730),
+        uphill_top10_rate_730d=("is_top10", "mean"), uphill_pts_730d=("pts", "sum"))
+    add(prof["mountain"] & (dd <= 365), mtn_lgap_mean_365d=("lgap", "mean"))
+
+    # Seconds lost per km in time trials (finishers only)
+    joined["_gap_km"] = (joined["hist_time"].clip(0, 3600) / joined["hist_distance"].where(joined["hist_distance"] > 0)
+                         ).where(joined["is_finished"])
+    add(prof["itt"] & (dd <= 730), itt_pts_730d=("pts", "sum"))
+    add(prof["itt"] & (dd <= 365), itt_gap_per_km_365d=("_gap_km", "mean"))
+
+    # Earlier editions of this race (Roubaix specialists, home races)
+    prev_ed = not_ttt & ((joined["hist_race_base"] == joined["target_race_base"])
+                         & (joined["hist_race_year"] < joined["target_race_year"])).to_numpy()
+    add(prev_ed,
+        race_hist_best_pos=("position", "min"), race_hist_pct_mean=("pct", "mean"),
+        race_hist_n=("hist_stage_id", "size"), race_hist_top10s=("is_top10", "sum"),
+        race_hist_pts=("pts", "sum"))
+
+    # Earlier stages of this edition: who is contesting what in this race
+    cur = not_ttt & (joined["hist_race_id"] == joined["target_race_id"]).to_numpy()
+    add(cur, cur_pct_mean=("pct", "mean"), cur_top10s=("is_top10", "sum"),
+        cur_n=("hist_stage_id", "size"), cur_pts=("pts", "sum"))
+    add(cur & rel, cur_same_pct_mean=("pct", "mean"), cur_same_best_pos=("position", "min"))
+    add(cur & bunch, cur_bunch_pct_mean=("pct", "mean"))
+    add(cur & select, cur_select_pct_mean=("pct", "mean"))
+    last = (joined.loc[cur, KEY + ["hist_date", "hist_stage_id", "position"]]
+            .sort_values(["hist_date", "hist_stage_id"], kind="stable")
+            .groupby(KEY, sort=False).tail(1).set_index(KEY)["position"].rename("cur_last_pos"))
+    frames.append(last.to_frame())
+
+    # ── stages like this one ──────────────────────────────────────────────────
+    # Every earlier result weighted by how close its stage was to the target
+    # stage: profile score (on a square-root scale, so 20 vs 40 counts like
+    # 200 vs 260), for simg_* also the gradient of the final km, and recency.
+    # Time trials are compared with time trials, road stages with road stages.
+    road_h = ~joined["hist_profile"].isin(["itt", "ttt"]).to_numpy()
+    same_kind = np.where((joined["target_profile"] == "itt").to_numpy(), prof["itt"], road_h)
+    with np.errstate(invalid="ignore"):
+        d_ps = (np.sqrt(joined["hist_ps"].to_numpy(dtype=np.float64))
+                - np.sqrt(joined["target_ps"].to_numpy(dtype=np.float64)))
+        # an unknown gradient on either side: no gradient weighting for that pair
+        d_grad = np.nan_to_num(joined["hist_gradient"].to_numpy(dtype=np.float64)
+                               - joined["target_grad"].to_numpy(dtype=np.float64), nan=0.0)
+        k_ps = np.exp(-0.5 * (d_ps / SIM_PROFILE_BANDWIDTH) ** 2) * np.power(0.5, dd / SIM_HALF_LIFE_DAYS)
+        k_grad = np.exp(-0.5 * (d_grad / SIM_GRADIENT_BANDWIDTH) ** 2)
+    top10 = joined["is_top10"].to_numpy(dtype=np.float64)
+    pts = joined["pts"].to_numpy(dtype=np.float64)
+    pct = joined["pct"].to_numpy(dtype=np.float64)          # NaN for non-finishers: averaged over finishes
+    rider_col, stage_col = joined["rider_id"].to_numpy(), joined["stage_id"].to_numpy()
+    for name, with_gradient in SIM_KERNELS:
+        k = k_ps * k_grad if with_gradient else k_ps
+        ok = same_kind & (dd <= SIM_WINDOW_DAYS) & ~np.isnan(k)
+        w = pd.DataFrame({
+            "rider_id": rider_col[ok], "stage_id": stage_col[ok],
+            "_n": k[ok], "_top10": (k * top10)[ok], "_pts": (k * pts)[ok],
+            "_pct": (k * pct)[ok], "_pct_w": np.where(np.isnan(pct), np.nan, k)[ok],
+        }).groupby(KEY, sort=False).sum()
+        frames.append(pd.DataFrame({
+            f"{name}_n": w["_n"],
+            f"{name}_top10": (w["_top10"] / w["_n"]).where(w["_n"] > 0),
+            f"{name}_pts": w["_pts"],
+            f"{name}_pct": (w["_pct"] / w["_pct_w"]).where(w["_pct_w"] > 0),
+        }))
+    del joined
+    return pd.concat(frames, axis=1)
+
+
+def history_features(targets: pd.DataFrame, hist: pd.DataFrame,
+                     max_pairs: int | None = None) -> pd.DataFrame:
+    """``_history_features`` computed rider group by rider group to bound memory
+    (``max_pairs`` defaults to MAX_PAIRS_PER_CHUNK)."""
+    parts = []
+    for riders in _rider_chunks(targets, hist, max_pairs or MAX_PAIRS_PER_CHUNK):
+        parts.append(_history_features(targets[targets["rider_id"].isin(riders)],
+                                       hist[hist["rider_id"].isin(riders)]))
+    return pd.concat(parts) if len(parts) > 1 else parts[0]
+
+
 def build_features(
     cutoff_date: str | None = None,
     race_slug: str | None = None,
     gender: str = "men",
     stage_clf="disk",
     entries: pd.DataFrame | None = None,
+    hide_route: bool = False,
 ) -> pd.DataFrame:
     """
     Build a feature DataFrame efficiently using vectorised operations.
@@ -376,6 +618,10 @@ def build_features(
         stage_id, rider_id and optionally bib, team_slug.  They become target
         rows (``top10`` NaN) built by the same code as historic stages, and
         never count as history.
+    hide_route : build the target rows as if PCS had not published their
+        routes yet (no profile score, final-km gradient or elevation; the
+        profile icon and the distance stay).  Earlier stages keep theirs.
+        For measuring what an early prediction is worth.
     """
     log.info("loading data from DB …")
     with get_conn() as conn:
@@ -445,6 +691,7 @@ def build_features(
     stages = stages.join(facts, on="id")
     stages = stages.join(race_sprint_history(stages), on="id")
     stages["race_base_code"] = pd.factorize(race_base(stages["race_slug"]))[0]
+    stages["ps"] = stages["profile_score"]        # carried onto every result row
     stages["race_year"] = stages["date"].dt.year
 
     results["is_entry"]    = results["status"] == ENTRY_STATUS
@@ -464,7 +711,7 @@ def build_features(
     # Join stage date onto results (needed for rolling)
     results = results.merge(
         stages[["id", "date", "profile_type", "surface", "gradient_final_km", "is_stage_race",
-                "n_fin", "finish_type", "tier", "race_id", "race_base_code", "race_year",
+                "n_fin", "finish_type", "ps", "tier", "race_id", "race_base_code", "race_year",
                 "distance_km"]].rename(columns={"id": "stage_id", "distance_km": "hist_distance"}),
         on="stage_id",
     )
@@ -523,14 +770,32 @@ def build_features(
         log.warning("no result or start-list rows for the target stages")
         return pd.DataFrame()
     base["top10"] = base["is_top10"].astype(float).where(~base["is_entry"])
+    if hide_route:
+        for col in ("ps", "profile_score", "gradient_final_km", "elevation_m"):
+            base[col] = np.nan
+    # A route PCS has not published (or that could not be read) is replaced by
+    # the typical stage of its profile icon; route_known says which rows that is.
+    # The stage classifier is scored on these filled rows (attach_stage_outcome)
+    # but fitted on the stages as stored (model.stage_classifier.label_stages,
+    # unknown = NaN): a stand-in stage is meant to be read as a typical one,
+    # not as one of the few stored stages without a route.
+    base["route_known"] = base["profile_score"].notna()
+    for fact in ("profile_score", "gradient_final_km"):
+        typical = base["stage_profile"].map({k: v[fact] for k, v in ROUTE_DEFAULTS.items()})
+        base[fact] = base[fact].fillna(typical)
+    typical_climb = base["stage_profile"].map({k: v["elevation_per_km"] for k, v in ROUTE_DEFAULTS.items()})
+    no_elevation = base["elevation_m"].isna()
+    base["elevation_m"] = base["elevation_m"].fillna(typical_climb * base["distance_km"].where(base["distance_km"] > 0))
+    # Climbing per km.  Where the elevation was unknown and there is no distance
+    # either, the typical value stands in directly.
+    climb = base["elevation_m"] / base["distance_km"].replace(0, np.nan)
+    base["elevation_per_km"] = climb.where(~no_elevation, climb.fillna(typical_climb))
 
     # Attach team GC stats via bib-based team_id (already on base from results)
     base["team_id"] = (base["bib"] // 10).where(base["bib"].notna())
     base = base.merge(_team_gc, on=["stage_id", "team_id"], how="left")
 
     # ── rolling features over each rider's earlier results ────────────────────
-    # One row per (target rider-stage, earlier result of that rider); every
-    # rolling feature is a masked group-by over that frame.
     log.info("computing rolling features …")
 
     hist = results.loc[~results["is_entry"]].rename(columns={
@@ -541,177 +806,41 @@ def build_features(
         "is_stage_race": "hist_is_stage_race",
         "finish_type": "hist_finish", "race_id": "hist_race_id",
         "race_base_code": "hist_race_base", "race_year": "hist_race_year",
-        "time_seconds": "hist_time",
+        "time_seconds": "hist_time", "ps": "hist_ps",
     })[["rider_id", "hist_date", "hist_stage_id", "position", "is_finished", "is_dnf", "is_top10",
         "is_top3", "is_win", "hist_profile", "hist_surface", "hist_gc_rank", "hist_gradient",
         "hist_is_stage_race", "pct", "pts", "lgap", "tier_w", "hist_finish", "hist_race_id",
-        "hist_race_base", "hist_race_year", "hist_time", "hist_distance"]].copy()
+        "hist_race_base", "hist_race_year", "hist_time", "hist_distance", "hist_ps"]].copy()
+    typical_ps = {label: facts["profile_score"] for label, facts in ROUTE_DEFAULTS.items()}
+    hist["hist_ps"] = hist["hist_ps"].fillna(hist["hist_profile"].map(typical_ps))
     hist["hist_profile"] = hist["hist_profile"].astype(_PROFILE_DTYPE)
     hist["hist_surface"] = hist["hist_surface"].fillna("road").astype(_SURFACE_DTYPE)
     hist["hist_finish"] = hist["hist_finish"].astype(_FINISH_DTYPE)
     hist["hist_is_stage_race"] = hist["hist_is_stage_race"].fillna(0).astype(bool)
     for col in ("position", "hist_gc_rank", "hist_gradient", "pct", "pts", "lgap", "tier_w",
-                "hist_time", "hist_distance"):
+                "hist_time", "hist_distance", "hist_ps"):
         hist[col] = hist[col].astype(np.float32)
     for col in ("hist_stage_id", "hist_race_id", "hist_race_base", "hist_race_year"):
         hist[col] = hist[col].astype(np.int32)
 
     targets = base[KEY + ["stage_date", "stage_profile", "surface", "race_id", "race_base_code",
-                          "race_year"]].drop_duplicates(KEY).rename(columns={
+                          "race_year", "ps", "gradient_final_km"]].drop_duplicates(KEY).rename(columns={
         "stage_profile": "target_profile", "surface": "target_surface", "race_id": "target_race_id",
-        "race_base_code": "target_race_base", "race_year": "target_race_year"})
+        "race_base_code": "target_race_base", "race_year": "target_race_year",
+        "ps": "target_ps", "gradient_final_km": "target_grad"})
+    targets["target_ps"] = targets["target_ps"].fillna(targets["target_profile"].map(typical_ps))
+    for col in ("target_ps", "target_grad"):
+        targets[col] = targets[col].astype(np.float32)
     targets["target_profile"] = targets["target_profile"].astype(_PROFILE_DTYPE)
     targets["target_surface"] = targets["target_surface"].fillna("road").astype(_SURFACE_DTYPE)
     for col in ("target_race_id", "target_race_base", "target_race_year"):
         targets[col] = targets[col].astype(np.int32)
 
-    joined = _history_pairs(targets, hist)
+    base = base.join(history_features(targets, hist), on=KEY)
     del hist, targets
-    dd = joined["_day_delta"].to_numpy()
-    # TTT results reflect team performance, not individual ability — exclude
-    # them from general rolling form so they don't inflate/distort rider metrics.
-    not_ttt = (joined["hist_profile"] != "ttt").to_numpy()
-
-    def add(mask, **aggs) -> None:
-        """Join group-by aggregates of the history rows under ``mask`` onto base."""
-        nonlocal base
-        cols = sorted({src for src, _ in aggs.values()})
-        sub = joined.loc[mask, KEY + cols] if mask is not None else joined[KEY + cols]
-        base = base.join(sub.groupby(KEY, sort=False).agg(**aggs), on=KEY)
-
-    add(not_ttt & (dd <= 30), avg_pos_30d=("position", "mean"), top10_rate_30d=("is_top10", "mean"),
-        races_last_30d=("hist_stage_id", "count"))
-    add(not_ttt & (dd <= 60), avg_pos_60d=("position", "mean"))
-    add(not_ttt & (dd <= 90), avg_pos_90d=("position", "mean"), top10_rate_90d=("is_top10", "mean"),
-        win_rate_90d=("is_win", "mean"), dnf_rate_90d=("is_dnf", "mean"),
-        pts_90d=("pts", "sum"), pct_mean_90d=("pct", "mean"))
-    add(not_ttt, _last_race=("hist_date", "max"), n_results_all=("hist_stage_id", "size"))
     base["days_since_last_race"] = (base["stage_date"] - base["_last_race"]) / np.timedelta64(1, "D")
     base = base.drop(columns=["_last_race"])
-
-    # ── profile affinity ──────────────────────────────────────────────────────
-    log.info("computing profile affinity …")
-    prof = {pt: (joined["hist_profile"] == pt).to_numpy() for pt in ("mountain", "flat", "hilly", "itt")}
-    add(prof["mountain"], mountain_avg_pos=("position", "mean"))
-    add(prof["flat"], flat_avg_pos=("position", "mean"))
-    add(prof["hilly"], hilly_avg_pos=("position", "mean"))
-    # ITT win rate (all-time) — highly distinctive for pure TT specialists
-    add(prof["itt"], tt_avg_pos=("position", "mean"), tt_win_rate=("is_win", "mean"))
-
-    # ── profile-specific rolling features ─────────────────────────────────────
-    for pt, name in (("hilly", "hilly"), ("mountain", "mountain"), ("flat", "flat")):
-        add(prof[pt] & (dd <= 30), **{f"{name}_avg_pos_30d": ("position", "mean")})
-        add(prof[pt] & (dd <= 90), **{f"{name}_avg_pos_90d": ("position", "mean"),
-                                      f"{name}_top10_rate_90d": ("is_top10", "mean")})
-    add(prof["itt"] & (dd <= 90), tt_avg_pos_90d=("position", "mean"))
-    add(prof["itt"] & (dd <= 365), tt_avg_pos_365d=("position", "mean"), tt_top10_rate_365d=("is_top10", "mean"))
-
-    # ── relevant-stage rolling (profile + surface matched) ─────────────────────
-    log.info("computing relevant-stage and fatigue features …")
-    is_special = joined["target_surface"].isin(["cobbled", "gravel"]).to_numpy()
-    surface_match = (~is_special) | (joined["hist_surface"] == joined["target_surface"]).to_numpy()
-    rel = (joined["hist_profile"] == joined["target_profile"]).to_numpy() & surface_match
-    del is_special, surface_match
-
-    add(rel & (dd <= 30), relevant_avg_pos_30d=("position", "mean"))
-    add(rel & (dd <= 90), relevant_avg_pos_90d=("position", "mean"), relevant_top10_rate_90d=("is_top10", "mean"))
-    add(rel & (dd <= 365), relevant_avg_pos_365d=("position", "mean"),
-        relevant_top10_rate_365d=("is_top10", "mean"))
-
-    # ── fatigue: calendar days raced ──────────────────────────────────────────
-    add(dd <= 7, race_days_last_7d=("hist_date", "nunique"))
-    add(dd <= 14, race_days_last_14d=("hist_date", "nunique"))
-
-    # ── breakaway propensity ──────────────────────────────────────────────────
-    # Top-10s scored while starting the stage >20th on GC come from breakaways,
-    # not the favourites' group — a distinct skill the form features miss.
-    add(not_ttt & (joined["hist_gc_rank"] > 20).to_numpy() & (dd <= 365),
-        break_top10_rate_365d=("is_top10", "mean"), break_top10s_365d=("is_top10", "sum"))
     base["break_top10s_365d"] = base["break_top10s_365d"].fillna(0)
-
-    # ── punch-finish affinity ─────────────────────────────────────────────────
-    # Hilly stages with steep final km (>=5%) are classics/puncher territory,
-    # distinct from GC-style mountain stages or lumpy breakaway stages.
-    add(not_ttt & prof["hilly"] & (joined["hist_gradient"].fillna(0) >= 5.0).to_numpy() & (dd <= 90),
-        punch_top10_rate_90d=("is_top10", "mean"), punch_avg_pos_90d=("position", "mean"))
-
-    # ── one-day race form (breakaway proxy) ───────────────────────────────────
-    # Riders who succeed in one-day races perform similarly in GT breakaways:
-    # both require attacking from a non-GC position and staying away.
-    oneday = not_ttt & ~joined["hist_is_stage_race"].to_numpy()
-    add(oneday & (dd <= 365), oneday_top10_rate_365d=("is_top10", "mean"))
-    add(oneday & (dd <= 90), oneday_avg_pos_90d=("position", "mean"))
-    del oneday
-
-    # ══ point-in-time strength, finish-type skills, race history ══════════════
-    log.info("computing strength, finish-type and race-history features …")
-
-    # Recency-weighted level (half-life 45 days) and points (half-life 120 days)
-    w_form = np.power(0.5, dd / 45.0)
-    pct = joined["pct"].to_numpy(dtype=np.float64)
-    ewm = pd.DataFrame({
-        "rider_id": joined["rider_id"].to_numpy()[not_ttt], "stage_id": joined["stage_id"].to_numpy()[not_ttt],
-        "_pct_w": (pct * w_form)[not_ttt], "_w": np.where(np.isnan(pct), np.nan, w_form)[not_ttt],
-        "_pts_w": (joined["pts"].to_numpy(dtype=np.float64) * np.power(0.5, dd / 120.0))[not_ttt],
-    })
-    e = ewm.groupby(KEY, sort=False).agg(_pct_w=("_pct_w", "sum"), _w=("_w", "sum"), pts_ewm=("_pts_w", "sum"))
-    e["pct_ewm"] = (e["_pct_w"] / e["_w"]).where(e["_w"] > 0)
-    base = base.join(e[["pct_ewm", "pts_ewm"]], on=KEY)
-    del ewm, e, w_form, pct
-
-    add(not_ttt & (dd <= 365),
-        pts_365d=("pts", "sum"), pct_mean_365d=("pct", "mean"),
-        top3_rate_365d=("is_top3", "mean"), top10_rate_365d=("is_top10", "mean"),
-        wins_365d=("is_win", "sum"), best_pos_365d=("position", "min"),
-        n_results_365d=("hist_stage_id", "size"), tier_mean_365d=("tier_w", "mean"))
-    add(not_ttt & (dd <= 730), pts_730d=("pts", "sum"))
-
-    rel_ind = rel & not_ttt
-    add(rel_ind & (dd <= 365), rel_pts_365d=("pts", "sum"), rel_pct_mean_365d=("pct", "mean"))
-    add(rel_ind & (dd <= 730),
-        rel_pts_730d=("pts", "sum"), rel_top3_rate_730d=("is_top3", "mean"),
-        rel_best_pos_730d=("position", "min"), rel_n_730d=("hist_stage_id", "size"))
-
-    bunch = not_ttt & (joined["hist_finish"] == "bunch").to_numpy()
-    select = not_ttt & (joined["hist_finish"] == "select").to_numpy()
-    add(bunch & (dd <= 730),
-        bunch_top10_rate_730d=("is_top10", "mean"), bunch_top3_rate_730d=("is_top3", "mean"),
-        bunch_pts_730d=("pts", "sum"), bunch_n_730d=("hist_stage_id", "size"))
-    add(bunch & (dd <= 365), bunch_pct_mean_365d=("pct", "mean"))
-    add(select & (dd <= 730),
-        select_top10_rate_730d=("is_top10", "mean"), select_pts_730d=("pts", "sum"),
-        select_n_730d=("hist_stage_id", "size"))
-    add(select & (dd <= 365), select_pct_mean_365d=("pct", "mean"))
-    add(not_ttt & (joined["hist_gradient"].fillna(0) >= 4.0).to_numpy() & (dd <= 730),
-        uphill_top10_rate_730d=("is_top10", "mean"), uphill_pts_730d=("pts", "sum"))
-    add(prof["mountain"] & (dd <= 365), mtn_lgap_mean_365d=("lgap", "mean"))
-
-    # Seconds lost per km in time trials (finishers only)
-    joined["_gap_km"] = (joined["hist_time"].clip(0, 3600) / joined["hist_distance"].where(joined["hist_distance"] > 0)
-                         ).where(joined["is_finished"])
-    add(prof["itt"] & (dd <= 730), itt_pts_730d=("pts", "sum"))
-    add(prof["itt"] & (dd <= 365), itt_gap_per_km_365d=("_gap_km", "mean"))
-
-    # Earlier editions of this race (Roubaix specialists, home races)
-    prev_ed = not_ttt & ((joined["hist_race_base"] == joined["target_race_base"])
-                         & (joined["hist_race_year"] < joined["target_race_year"])).to_numpy()
-    add(prev_ed,
-        race_hist_best_pos=("position", "min"), race_hist_pct_mean=("pct", "mean"),
-        race_hist_n=("hist_stage_id", "size"), race_hist_top10s=("is_top10", "sum"),
-        race_hist_pts=("pts", "sum"))
-
-    # Earlier stages of this edition: who is contesting what in this race
-    cur = not_ttt & (joined["hist_race_id"] == joined["target_race_id"]).to_numpy()
-    add(cur, cur_pct_mean=("pct", "mean"), cur_top10s=("is_top10", "sum"),
-        cur_n=("hist_stage_id", "size"), cur_pts=("pts", "sum"))
-    add(cur & rel, cur_same_pct_mean=("pct", "mean"), cur_same_best_pos=("position", "min"))
-    add(cur & bunch, cur_bunch_pct_mean=("pct", "mean"))
-    add(cur & select, cur_select_pct_mean=("pct", "mean"))
-    last = (joined.loc[cur, KEY + ["hist_date", "hist_stage_id", "position"]]
-            .sort_values(["hist_date", "hist_stage_id"], kind="stable")
-            .groupby(KEY, sort=False).tail(1).set_index(KEY)["position"].rename("cur_last_pos"))
-    base = base.join(last, on=KEY)
-    del joined, prev_ed, cur, rel, rel_ind, bunch, select, prof, not_ttt, dd, last
 
     for col in ("pts_90d", "pts_365d", "pts_730d", "pts_ewm", "rel_pts_365d", "rel_pts_730d",
                 "bunch_pts_730d", "select_pts_730d", "uphill_pts_730d", "itt_pts_730d",
@@ -738,6 +867,8 @@ def build_features(
     for col in ("elo_all", "elo_itt", "elo_mountain", "elo_cobbled"):
         base[f"{col}_frank"] = _field_rank(base, col)
     base["elo_all_gap"] = _field_gap(base, "elo_all")
+    for col in ("sim_pct", "sim_pts", "simg_pct"):
+        base[f"{col}_frank"] = _field_rank(base, col)
 
     # ── standing in today's field ─────────────────────────────────────────────
     for col in FIELD_RANK_SOURCES:
@@ -747,9 +878,6 @@ def build_features(
                .groupby("stage_id")["pts_365d"].mean().rename("field_pts_top10"))
     base = base.join(top_pts, on="stage_id")
     base["tier_code"] = base["tier"].map(TIER_CODE)
-
-    # ── elevation density ─────────────────────────────────────────────────────
-    base["elevation_per_km"] = base["elevation_m"] / base["distance_km"].replace(0, np.nan)
 
     # ── GC & team out-of-contention flags ─────────────────────────────────────
     # Riders / teams >10 min down have strong incentive to go in breaks.

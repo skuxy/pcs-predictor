@@ -102,7 +102,13 @@ def test_train_predict_and_backtest(workspace, monkeypatch):
                  "bib": ((i - 1) // 5) * 10 + (i - 1) % 5 + 1} for i in range(1, 31)]
     starters.append({"slug": "new-kid", "name": "KID New", "team": None, "team_slug": "team-9", "bib": 91})
     monkeypatch.setattr(predict, "fetch_startlist", lambda slug: starters)
+    routes = []
+    monkeypatch.setattr(predict, "fetch_stage_meta", lambda slug: routes.append(slug) or (
+        {"profile_score": 12, "gradient_final_km": 0.3, "elevation_m": 800} if slug.endswith("/2027") else {}))
     up = predict.predict_race("race/alpha/2027", "2027-03-01", gender="men")
+    # the open stage had no profile score: its route was asked for and is used
+    assert routes == ["race/alpha/2027"]
+    assert (up["profile_score"] == 12).all() and (up["gradient_final_km"] == 0.3).all()
     assert len(up) == 31 and up["top10"].isna().all()
     assert up["rider_name"].notna().all() and "KID New" in set(up["rider_name"])
     assert up["win_prob"].sum() == pytest.approx(1.0, abs=1e-6)
@@ -128,6 +134,12 @@ def test_evaluate_walk_forward_saves_summary_and_predictions(workspace):
     assert list(wf.columns) == ["stage_id", "rider_id", "fold", "top10_prob"]
     assert wf["stage_id"].nunique() == 7
     assert set(wf["fold"]) == {"2025-09-01", "2026-04-01"}
+
+    # the "route not published yet" variant prints its own report and never overwrites the saved files
+    before = evaluate.evaluation_path("men").read_text()
+    hidden = evaluate.evaluate(gender="men", folds=("2026-04-01",), targets=("top10",), save=True, hide_route=True)
+    assert hidden["config"]["hide_route"] is True and hidden["stages"] == 5
+    assert evaluate.evaluation_path("men").read_text() == before
 
     # a covered race is backtested from the saved out-of-sample predictions
     df, source = predict.backtest_predictions("race/gamma/2026", "men")

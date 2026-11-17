@@ -7,6 +7,21 @@ import pytest
 from db import database
 
 
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    """No test may reach PCS.  A fetch that a test forgot to fake fails at
+    once instead of quietly asking the real site (and passing)."""
+    from scraper import results, utils
+
+    def refuse(*args, **kwargs):
+        # pytest.fail is not an Exception subclass: no `except Exception` in the code under test swallows it
+        pytest.fail("a test tried to fetch from the network: fake the fetcher it calls")
+
+    monkeypatch.setattr(utils.SESSION, "get", refuse)
+    monkeypatch.setattr(utils, "fetch_with_playwright", refuse)
+    monkeypatch.setattr(results, "fetch_with_playwright", refuse)
+
+
 def _build_synthetic_db(path: str, seed: int = 7) -> dict:
     """Three seasons of three races for 30 riders in 6 teams of 5.
 

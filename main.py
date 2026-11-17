@@ -17,7 +17,7 @@ from db.rider_merge import (
 )
 from scraper.races import (iter_races, fetch_race_stages, fetch_stage_meta, find_race_alias, is_missing_page,
                            gender_from_category)
-from scraper.utils import fetch, pcs_url
+from scraper.utils import fetch, pcs_url, pages_newer_than
 from scraper.results import fetch_stage_results
 from scraper.riders import fetch_rider
 from config import SCRAPE_YEARS, DB_PATH, WOMEN_RACE_CLASSES, WOMEN_CIRCUIT, MEN_CIRCUITS
@@ -250,6 +250,11 @@ def _store_stage_results(conn, stage_id: int, results: list[dict], skip_riders: 
         })
 
 
+# For this many days after a stage, a page without its result is fetched again
+# on a later day (PCS enters some results late); after that the copy stands.
+RESULT_SETTLE_DAYS = 14
+
+
 def _scrape_race_results(race_id: int, race_slug: str, skip_riders: bool,
                          min_results: int = 1) -> int:
     """Fetch and store results for all stages of one race. Returns total results stored.
@@ -259,11 +264,22 @@ def _scrape_race_results(race_id: int, race_slug: str, skip_riders: bool,
     stage is scraped, NULL stage metadata (distance, elevation, profile score,
     ...) is filled from the same — cached — stage page.
     """
-    fetched = fetch_race_stages(race_slug)
-    if not fetched:
-        alias = _race_alias(race_id, race_slug)
-        if alias:
-            fetched = _alias_stage_list(race_id, race_slug, alias)
+    today_date = datetime.date.today()
+    today = today_date.isoformat()
+    yesterday = (today_date - datetime.timedelta(days=1)).isoformat()
+    settling_since = (today_date - datetime.timedelta(days=RESULT_SETTLE_DAYS)).isoformat()
+    with get_conn() as conn:
+        race_row = conn.execute("SELECT end_date FROM races WHERE id = ?", (race_id,)).fetchone()
+    race_end = race_row["end_date"] if race_row is not None else None
+    # A finished race: its overview and stage list cached while it was still
+    # to come (or under way) may be provisional, so only copies fetched after
+    # its last day are used.
+    with pages_newer_than(race_end if race_end and race_end < today else None):
+        fetched = fetch_race_stages(race_slug)
+        if not fetched:
+            alias = _race_alias(race_id, race_slug)
+            if alias:
+                fetched = _alias_stage_list(race_id, race_slug, alias)
     stages = _checked_stage_list(race_id, race_slug, fetched)
     if not stages:
         log.warning("no stages found for %s", race_slug)
@@ -297,16 +313,35 @@ def _scrape_race_results(race_id: int, race_slug: str, skip_riders: bool,
             total += existing
             continue
 
-        fetch_slug = stage_data.get("fetch_slug") or stage_data["pcs_slug"]
-        results = fetch_stage_results(fetch_slug)
-        if not results:
-            log.warning("no results for stage %s", stage_data["pcs_slug"])
+        with get_conn() as conn:
+            stored = conn.execute("SELECT date FROM stages WHERE id = ?", (stage_id,)).fetchone()
+        stage_date = stage_data.get("date") or (stored["date"] if stored is not None else None)
+        if stage_date and stage_date > today:
+            # Nothing to fetch yet — and a page fetched now would only be a
+            # pre-race copy in the cache.
+            log.debug("  stage %s is on %s — not ridden yet", stage_data["pcs_slug"], stage_date)
             continue
 
-        # Stage metadata from the same (cached) page the results came from: it
-        # describes the stage as raced (the stored values may be a provisional
-        # route — shortened stages, changed towns, a day's shift).
-        meta = fetch_stage_meta(fetch_slug)
+        fetch_slug = stage_data.get("fetch_slug") or stage_data["pcs_slug"]
+        # A copy of the page cached on or before the stage's day cannot be
+        # trusted to hold the result (see scraper.utils.pages_newer_than).
+        # PCS may enter a result a day or more late, so for RESULT_SETTLE_DAYS
+        # after the stage a copy from before today is not trusted either: a
+        # stage without a result is asked for once a day, then left alone.
+        # (a stage without a date: the last day of its race, once that is over)
+        stale_through = stage_date or (race_end if race_end and race_end < today else None)
+        if stage_date and stage_date >= settling_since:
+            stale_through = max(stage_date, yesterday)
+        with pages_newer_than(stale_through):
+            results = fetch_stage_results(fetch_slug)
+            if not results:
+                log.warning("no results for stage %s", stage_data["pcs_slug"])
+                continue
+
+            # Stage metadata from the same (cached) page the results came from: it
+            # describes the stage as raced (the stored values may be a provisional
+            # route — shortened stages, changed towns, a day's shift).
+            meta = fetch_stage_meta(fetch_slug)
         with get_conn() as conn:
             results = _canonical_results(conn, results, fetch_slug, stage_id)
             _store_stage_results(conn, stage_id, results, skip_riders, riders_seen)
@@ -359,9 +394,12 @@ def cmd_evaluate(args):
     from model.evaluate import DEFAULT_FOLDS, evaluate, format_report
     folds = tuple(_csv(args.folds)) or DEFAULT_FOLDS
     targets = ("top10",) if args.top10_only else ("top10", "top3", "win")
-    rep = evaluate(gender=args.gender, folds=folds, targets=targets, save=not args.no_save)
-    print(format_report(rep, f"Walk-forward evaluation ({args.gender}): every stage predicted by models "
-                             f"trained on earlier stages only"))
+    rep = evaluate(gender=args.gender, folds=folds, targets=targets, save=not args.no_save,
+                   hide_route=args.hide_route)
+    title = f"Walk-forward evaluation ({args.gender}): every stage predicted by models trained on earlier stages only"
+    if args.hide_route:
+        title += " — as if PCS had not published the routes of the test stages (nothing saved)"
+    print(format_report(rep, title))
 
 
 def cmd_backtest(args):
@@ -380,14 +418,21 @@ def cmd_predict(args):
     print_predictions(df, top_n=args.top_n)
 
 
+# scrape-elevation asks PCS for the route of stages up to this many days ahead.
+ROUTE_HORIZON_DAYS = 21
+
+
 def cmd_scrape_elevation(args):
-    """Backfill elevation_m for stages that are missing it.
+    """Backfill the route of stages that lack part of it: elevation, final-km
+    gradient, profile score, distance, and the profile of stages whose label
+    is still the stage-list default.
 
     Also fixes NULL date/distance/profile_type for one-day stages whose metadata
     wasn't scraped correctly (e.g. because _parse_infolist used div.bold instead
-    of div.title).
+    of div.title).  Stages more than ROUTE_HORIZON_DAYS ahead are left for a
+    later run.
     """
-    from scraper.races import fetch_stage_elevation, fetch_race_stages, fetch_result_meta
+    from scraper.races import fetch_stage_elevation, fetch_race_stages, fetch_result_meta, fetch_stage_meta
     from db.database import get_conn
 
     # ── fix one-day stages with NULL date (broken metadata parse) ─────────────
@@ -421,17 +466,25 @@ def cmd_scrape_elevation(args):
     log.info("meta backfill complete: %d/%d fixed", meta_fixed, len(null_meta))
 
     # ── backfill elevation_m ───────────────────────────────────────────────────
+    # Pages are trusted for a stage's route only when fetched after its day
+    # (pages_newer_than): a stage still to come is fetched afresh each run,
+    # until PCS has its profile.  Stages more than three weeks ahead are left
+    # for a later run (PCS rarely has their route, and there are hundreds).
+    horizon = (datetime.date.today() + datetime.timedelta(days=ROUTE_HORIZON_DAYS)).isoformat()
     with get_conn() as conn:
         rows = conn.execute(
-            """SELECT id, pcs_slug FROM stages
+            """SELECT id, pcs_slug, date FROM stages
                WHERE elevation_m IS NULL AND pcs_slug NOT LIKE '%/result'
-               ORDER BY id"""
+                 AND (date IS NULL OR date <= ?)
+               ORDER BY id""",
+            (horizon,),
         ).fetchall()
 
     log.info("stages missing elevation: %d", len(rows))
     updated = 0
     for row in rows:
-        elev = fetch_stage_elevation(row["pcs_slug"])
+        with pages_newer_than(row["date"]):
+            elev = fetch_stage_elevation(row["pcs_slug"])
         if elev:
             with get_conn() as conn:
                 conn.execute(
@@ -449,15 +502,18 @@ def cmd_scrape_elevation(args):
     # (also corrects the default 'mountain' label of stages whose page was never read)
     with get_conn() as conn:
         grad_rows = conn.execute(
-            """SELECT id, pcs_slug FROM stages
+            """SELECT id, pcs_slug, date FROM stages
                WHERE gradient_final_km IS NULL
-               ORDER BY id"""
+                 AND (date IS NULL OR date <= ?)
+               ORDER BY id""",
+            (horizon,),
         ).fetchall()
 
     log.info("stages missing gradient/profile meta: %d", len(grad_rows))
     meta_updated = 0
     for row in grad_rows:
-        meta = fetch_result_meta(row["pcs_slug"])
+        with pages_newer_than(row["date"]):
+            meta = fetch_result_meta(row["pcs_slug"])
         if meta.get("gradient_final_km") is not None or meta.get("profile_score") is not None:
             with get_conn() as conn:
                 conn.execute(
@@ -487,6 +543,48 @@ def cmd_scrape_elevation(args):
             log.debug("  no meta: %s", row["pcs_slug"])
 
     log.info("gradient/profile backfill: %d/%d updated", meta_updated, len(grad_rows))
+
+    # ── backfill distance_km ──────────────────────────────────────────────────
+    # A stage stored from the stage list before PCS showed its distance keeps
+    # 0: `scrape` skips a stage once it has results.  The stage page has the
+    # distance (the /result page for a one-day race).  The stage-list default
+    # label ('mountain', no profile score, no distance) is recognised by its
+    # missing distance, so such a stage gets one only together with the
+    # profile its page shows.
+    with get_conn() as conn:
+        dist_rows = conn.execute(
+            """SELECT id, pcs_slug, date, profile_type, profile_score FROM stages
+               WHERE COALESCE(distance_km, 0) = 0
+                 AND (date IS NULL OR date <= ?)
+               ORDER BY id""",
+            (horizon,),
+        ).fetchall()
+
+    log.info("stages missing distance: %d", len(dist_rows))
+    dist_updated = 0
+    for row in dist_rows:
+        slug = row["pcs_slug"]
+        with pages_newer_than(row["date"]):
+            meta = fetch_stage_meta(slug)
+            one_day = not any(part in slug for part in ("/stage-", "/prologue", "/result"))
+            if one_day and not meta.get("distance_km"):
+                meta = fetch_stage_meta(f"{slug}/result")
+        km = meta.get("distance_km")
+        if not km:
+            log.debug("  %s → no distance", slug)
+            continue
+        unread = row["profile_type"] == "mountain" and row["profile_score"] is None
+        label = meta.get("profile_type") if unread else row["profile_type"]
+        if label is None:
+            log.debug("  %s → %.1f km on the page but no profile: left as it is", slug, km)
+            continue
+        with get_conn() as conn:
+            conn.execute("UPDATE stages SET distance_km = ?, profile_type = ? "
+                         "WHERE id = ? AND COALESCE(distance_km, 0) = 0", (km, label, row["id"]))
+        dist_updated += 1
+        log.info("  %s → %.1f km%s", slug, km, f", profile={label}" if unread else "")
+
+    log.info("distance backfill complete: %d/%d updated", dist_updated, len(dist_rows))
 
 
 def cmd_scrape_race(args):
@@ -1213,6 +1311,9 @@ def main(argv=None):
                         help="Skip the podium and win models (three times faster)")
     p_eval.add_argument("--no-save", action="store_true", dest="no_save",
                         help="Print only; do not write model/evaluation*.json and model/walkforward*.csv.gz")
+    p_eval.add_argument("--hide-route", action="store_true", dest="hide_route",
+                        help="Score the test stages without their profile score, final-km gradient and "
+                             "elevation, as a prediction made before PCS publishes the route (prints only)")
     p_eval.set_defaults(func=cmd_evaluate)
 
     p_bt = sub.add_parser("backtest", help="Backtest against a historic race")

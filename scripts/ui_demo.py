@@ -8,6 +8,10 @@ and the production code are untouched; the predictions shown are for looking
 at the screen, not for judging the model (it has seen this race).
 
     PCS_DEMO_RACE=race/il-lombardia/2026 streamlit run scripts/ui_demo.py
+
+With PCS_DEMO_HIDE_ROUTE=1 the race's stages also lose their profile score,
+final-km gradient and elevation, as before PCS publishes a route: the tab
+then shows the "predicted as a typical stage" note.
 """
 import datetime
 import os
@@ -45,11 +49,15 @@ if "PCS_UI_DEMO_READY" not in os.environ:
         last = datetime.date.fromisoformat(stages[-1]["date"]) + shift
         conn.execute("UPDATE races SET start_date = ?, end_date = ? WHERE id = ?",
                      (tomorrow.isoformat(), last.isoformat(), race["id"]))
+        if os.environ.get("PCS_DEMO_HIDE_ROUTE"):
+            conn.execute("UPDATE stages SET profile_score = NULL, gradient_final_km = NULL, elevation_m = NULL "
+                         "WHERE race_id = ?", (race["id"],))
         conn.commit()
     os.environ["PCS_DB_PATH"] = copy          # read by config.py when the project is imported below
     os.environ["PCS_UI_DEMO_READY"] = "1"
 
     import model.predict as predict
     predict.fetch_startlist = lambda slug: starters if slug == RACE else []
+    predict.refresh_open_stage_routes = lambda stage_ids: 0      # no request to PCS from the demo
 
 exec(compile((ROOT / "ui" / "app.py").read_text(), str(ROOT / "ui" / "app.py"), "exec"))

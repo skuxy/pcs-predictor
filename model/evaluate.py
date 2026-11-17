@@ -168,6 +168,7 @@ def walk_forward(
     end: str | None = None,
     stage_clf: bool = True,
     extra_cols: tuple[str, ...] = (),
+    test_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Predict every stage on or after ``folds[0]`` with a model that only saw
     earlier stages.
@@ -177,6 +178,10 @@ def walk_forward(
     ``stage_clf`` the stage outcome classifier is refitted per fold on stages
     before the window and its p_sprint / p_breakaway / p_gc columns replaced.
 
+    ``test_df``: take the test rows of every window from this frame instead —
+    the same stages built differently (``build_features(hide_route=True)``);
+    the models are still fitted on ``df``.
+
     Returns one row per (rider, stage) with the stage metadata, ``score`` and
     ``fold``.  Team time trials are not scored (their "position" is the team's).
     """
@@ -185,14 +190,22 @@ def walk_forward(
 
     df = df.copy()
     df["stage_date"] = pd.to_datetime(df["stage_date"])
+    if test_df is not None:
+        test_df = test_df.copy()
+        test_df["stage_date"] = pd.to_datetime(test_df["stage_date"])
     starts = [pd.Timestamp(f) for f in folds]
     stop_all = pd.Timestamp(end) if end else df["stage_date"].max() + pd.Timedelta(days=1)
     out = []
     for i, start in enumerate(starts):
         stop = starts[i + 1] if i + 1 < len(starts) else stop_all
-        fold_df = attach_stage_outcome(df, fit_bundle(start.strftime("%Y-%m-%d"))) if stage_clf else df
+        bundle = fit_bundle(start.strftime("%Y-%m-%d")) if stage_clf else None
+        fold_df = attach_stage_outcome(df, bundle) if stage_clf else df
+        if test_df is None:
+            fold_test = fold_df
+        else:
+            fold_test = attach_stage_outcome(test_df, bundle) if stage_clf else test_df
         train = fold_df[fold_df["stage_date"] < start]
-        test = fold_df[(fold_df["stage_date"] >= start) & (fold_df["stage_date"] < stop)]
+        test = fold_test[(fold_test["stage_date"] >= start) & (fold_test["stage_date"] < stop)]
         test = test[test["profile_type"] != "ttt"]
         if train.empty or test.empty:
             log.warning("fold %s: train %d rows, test %d rows — skipped", start.date(), len(train), len(test))
@@ -334,7 +347,7 @@ def load_walkforward(gender: str = "men") -> pd.DataFrame | None:
 
 
 def evaluate(gender: str = "men", folds=DEFAULT_FOLDS, targets=("top10", "top3", "win"),
-             save: bool = True) -> dict:
+             save: bool = True, hide_route: bool = False) -> dict:
     """Walk-forward evaluation of the production pipeline.
 
     Builds the features once, refits the stage classifier and one calibrated
@@ -344,6 +357,10 @@ def evaluate(gender: str = "men", folds=DEFAULT_FOLDS, targets=("top10", "top3",
     it goes to ``model/evaluation[_women].json`` and the models' raw per-rider
     outputs to ``model/walkforward[_women].csv.gz`` (the UI's backtest reads
     them).
+
+    ``hide_route`` scores the test stages as if PCS had not published their
+    routes yet (no profile score, final-km gradient or elevation: what an
+    early prediction has to work with).  Nothing is saved in that mode.
     """
     import datetime
 
@@ -357,6 +374,8 @@ def evaluate(gender: str = "men", folds=DEFAULT_FOLDS, targets=("top10", "top3",
     df = build_features(gender=gender, stage_clf=None)
     if df.empty:
         raise RuntimeError("no features built — run the scraper first")
+    test_df = build_features(gender=gender, stage_clf=None, hide_route=True) if hide_route else None
+    save = save and not hide_route
 
     def fitter(train, test, cols):
         out = {}
@@ -366,7 +385,8 @@ def evaluate(gender: str = "men", folds=DEFAULT_FOLDS, targets=("top10", "top3",
             out[f"{t}_prob"] = model.predict_proba(test[cols])[:, 1]
         return out
 
-    raw = walk_forward(df, FEATURE_COLS, fitter, folds, extra_cols=tuple(c for _, _, c in BASELINES))
+    raw = walk_forward(df, FEATURE_COLS, fitter, folds, extra_cols=tuple(c for _, _, c in BASELINES),
+                       test_df=test_df)
     pred = coherent_probabilities(raw)         # what predict_race hands out
     rep = report(pred, "top10_prob",
                  podium_col="top3_prob" if "top3" in targets else None,
@@ -381,6 +401,7 @@ def evaluate(gender: str = "men", folds=DEFAULT_FOLDS, targets=("top10", "top3",
         "folds": list(folds),
         "targets": targets,
         "n_features": len(FEATURE_COLS),
+        "hide_route": hide_route,
         "model": {"type": "HistGradientBoostingClassifier × 5, isotonic-calibrated", **HGB_PARAMS},
         "generated": datetime.date.today().isoformat(),
     }

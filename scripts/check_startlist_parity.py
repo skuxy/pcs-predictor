@@ -73,6 +73,7 @@ def main(argv=None) -> int:
             {"slug": r.slug, "name": r.name, "team": None, "team_slug": r.team_slug,
              "bib": None if pd.isna(r.bib) else int(r.bib)}
             for r in starters.itertuples()]
+        predict.refresh_open_stage_routes = lambda stage_ids: 0      # no request to PCS from this check
         entries, _ = predict.startlist_entries(args.race, start)
         got = build_features(cutoff_date=start, race_slug=args.race, gender=args.gender, stage_clf=None,
                              entries=entries)

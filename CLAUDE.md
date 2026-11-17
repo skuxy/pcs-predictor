@@ -33,7 +33,7 @@ streamlit run ui/app.py   # opens at http://localhost:8501
 
 # CLI pipeline
 python main.py scrape --years 2026 [--gender women] [--skip-riders]
-python main.py scrape-elevation          # backfill NULL elevation_m values
+python main.py scrape-elevation          # backfill missing elevation, gradient, profile score, distance
 python main.py tag-surface               # tag cobbled/gravel stages
 
 python main.py train                     # stage classifier + top-10 / podium / win models on every stored result
@@ -52,6 +52,8 @@ python main.py scrape-race race/milano-sanremo/2026
 python main.py scrape-race race/milano-sanremo/2026 --skip-riders  # faster, no profile updates
 ```
 
+Tests never reach PCS: an autouse fixture in `tests/conftest.py` fails any fetch a test did not fake.
+
 See `RUNBOOK.md` for operational recipes (new-season pipeline, sharing the DB, adding ProSeries races).
 
 ## Architecture
@@ -60,19 +62,19 @@ Data flows strictly left-to-right: **scrape → SQLite → feature engineering �
 
 ### Pipeline
 
-1. **`scraper/`** — fetches HTML from PCS, caches to `cache/html/` (not tracked in git), rate-limited to 1.5 s per request. Each module handles a different page type: `races.py` (calendars, stage lists), `results.py` (stage results), `riders.py` (profiles), `startlist.py` (upcoming races), `gpx.py` (GPX climb detection).
+1. **`scraper/`** — fetches HTML from PCS, caches to `cache/html/` (not tracked in git; cached pages never expire except start lists, the running season's calendar, and stage pages cached on or before the stage's day when its result or route is wanted — `scraper.utils.pages_newer_than`), rate-limited to 1.5 s per request. Each module handles a different page type: `races.py` (calendars, stage lists), `results.py` (stage results), `riders.py` (profiles), `startlist.py` (upcoming races), `gpx.py` (GPX climb detection).
 
 2. **`db/`** — SQLite via stdlib `sqlite3`. All writes use upsert semantics. Key tables: `riders`, `races`, `stages`, `results`, `stage_climbs`, `upcoming_races`/`upcoming_stages`/`predictions`. Schema is in `db/schema.sql`.
 
-3. **`features/builder.py`** — builds one row per (rider, stage) pair with 173 features (`FEATURE_COLS`). `_history_pairs` pairs every target row with that rider's earlier results (index ranges, no cross join); every rolling feature is a masked group-by over that frame. Groups: rolling form, fatigue, profile affinity, relevant-stage rolling, stage context, GC state (original 80); point-in-time strength (PCS points, finishing percentile, recency-weighted), finish-type skills (bunch sprint vs small group, from how past stages were actually decided), earlier editions of the race and earlier stages of this edition, team role (bib decade, leader bib), rank within today's field, and Elo-style ratings from `features/ratings.py`. `entries=` adds start-list rows for stages without a result, so upcoming stages use the same code as historic ones.
+3. **`features/builder.py`** — builds one row per (rider, stage) pair with 184 features (`FEATURE_COLS`). `history_features` pairs every target row with that rider's earlier results (`_history_pairs`: index ranges, no cross join; riders are processed in groups of at most `MAX_PAIRS_PER_CHUNK` pairs, which keeps a full build at about 3.5 GB); every rolling feature is a masked group-by over that frame. Groups: rolling form, fatigue, profile affinity, relevant-stage rolling, stage context, GC state (original 80); point-in-time strength (PCS points, finishing percentile, recency-weighted), finish-type skills (bunch sprint vs small group, from how past stages were actually decided), earlier editions of the race and earlier stages of this edition, team role (bib decade, leader bib), rank within today's field, Elo-style ratings from `features/ratings.py`, and "stages like this one" (`SIMILAR_STAGE_COLS`: earlier results weighted by how close the stage's profile score and final-km gradient were to the target's). A target stage without a published route gets the typical values of its profile icon (`ROUTE_DEFAULTS`, flagged by `route_known`). `entries=` adds start-list rows for stages without a result, so upcoming stages use the same code as historic ones; `hide_route=True` builds the target rows as if their routes were not published.
 
 4. **`model/stage_classifier.py`** — predicts how a stage will be decided (sprint / breakaway / gc) from pre-race stage facts and how earlier editions of the race ended; its probabilities are features of the main model (`attach_stage_outcome`).
 
 5. **`model/train.py`** — `HistGradientBoostingClassifier` (leaf-wise, column subsampling, handles NaN natively) wrapped in `CalibratedClassifierCV(method="isotonic")` with 5 stage-grouped folds; one model each for top 10, podium and win. Saves `model/trained_model[_women][_top3|_win].pkl`, `model/feature_names[_women].json`, `model/metrics[_women][_top3|_win].json`.
 
-6. **`model/predict.py`** — `predict_race` (historic stages from their results, open stages from the PCS start list), `coherent_probabilities` (P(win) sums to 1 per stage, win ≤ podium ≤ top 10) and `backtest_predictions` (saved walk-forward predictions when the race is covered, else the model on disk with a seen / unseen flag). Feature alignment is enforced via `feature_names.json`.
+6. **`model/predict.py`** — `predict_race` (historic stages from their results, open stages from the PCS start list, after `refresh_open_stage_routes` has fetched the open stages' profile score / gradient / elevation), `coherent_probabilities` (P(win) sums to 1 per stage, win ≤ podium ≤ top 10) and `backtest_predictions` (saved walk-forward predictions when the race is covered, else the model on disk with a seen / unseen flag). Feature alignment is enforced via `feature_names.json`.
 
-7. **`model/evaluate.py`** — walk-forward evaluation: each test window is predicted by models fitted only on earlier stages. Per-stage metrics (top-10 hits, podium hits, winner's rank, AUC, nDCG), breakdowns, calibration; `python main.py evaluate` saves `model/evaluation[_women].json` and `model/walkforward[_women].csv.gz`. `model/backtest.py` prints one race.
+7. **`model/evaluate.py`** — walk-forward evaluation: each test window is predicted by models fitted only on earlier stages. Per-stage metrics (top-10 hits, podium hits, winner's rank, AUC, nDCG), breakdowns, calibration; `python main.py evaluate` saves `model/evaluation[_women].json` and `model/walkforward[_women].csv.gz`; `--hide-route` scores the test stages without their routes (what an early prediction is worth; prints only). `model/backtest.py` prints one race.
 
 8. **`ui/app.py`** — Streamlit UI with four tabs: Predictions (races with a stage still to ride), Historical Backtest (out-of-sample banner), Model (walk-forward accuracy, calibration, importances, DB stats) and Bet Tracker.
 

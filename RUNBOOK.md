@@ -111,8 +111,37 @@ loads, every later one is answered 403 with a Turnstile check; plain
 `requests` get 403 at once). The scraper gives up on those URLs and stores
 nothing for them, so it is safe to stop and re-run later from a network PCS
 accepts: on 16 November 2026 the same commands ran from a laptop without a
-single challenge (plain requests, no browser). Nothing else depends on it: training, `evaluate`, backtests and the UI
-only read the database.
+single challenge (plain requests, no browser). Nothing else depends on it:
+training, `evaluate`, backtests and the UI only read the database.
+
+**How long a cached page is trusted.** For ever, with four exceptions:
+
+| Page | Fetched again when |
+|---|---|
+| Start list | the copy is older than 6 hours |
+| Calendar of the running (or a coming) season | the copy is from before today |
+| A stage page, when the stage's **result or route** is wanted | the copy was written on or before the stage's day — or, for a stage of the last two weeks that still has no result, before today |
+| Overview and stage list of a finished race | the copy was written on or before the race's last day |
+
+The last two are `scraper.utils.pages_newer_than(day)`, used by `scrape`,
+`scrape-missing`, `scrape-race`, `scrape-elevation` and `predict`. The reason:
+a stage page stored before the stage was ridden shows the start list where
+the result will be, and the parser reads that as a cancelled stage ("no real
+finishing positions (all 'NR' placeholders)"). Before November 2026 such a
+copy was served for ever, so the stage never got its result. A page is
+fetched again at most once per run (a process that stays up, like the UI,
+asks again after six hours), and `scrape` no longer asks for stages that are
+still to come (nothing to store, and no pre-race copy in the cache). PCS
+enters some results a day or more late, hence the two weeks
+(`main.RESULT_SETTLE_DAYS`) in which a stage without a result is asked for
+once a day. A real cancellation still reads the same way — but from a page
+fetched after the stage's day. If the new fetch fails, the old copy is not
+used: the stage simply stays without a result for that run.
+
+The first run after this change fetches again whatever was cached too early:
+for `scrape-missing --year 2026` at most about 100 pages (30 races with open
+stages), for a full `scrape --years 2026` at most about 300. After that the
+copies are newer than the days in question and stay.
 
 Environment knobs:
 
@@ -167,7 +196,9 @@ Things the log will tell you about:
   stage ...") and stage dates follow PCS; stored stages PCS no longer lists are
   left alone (they stay empty).
 - **Still empty** after a run usually means PCS itself has no results (empty
-  table, no "Won how"), or a cancelled stage (all `NR`).
+  table, no "Won how"), or a cancelled stage (all `NR`). An `NR` page that
+  came out of the cache from before the stage's day is fetched again (see
+  "How long a cached page is trusted").
 
 `--backfill-teams` additionally re-parses every stage of the selected races
 (cache first, network otherwise) and fills `team_slug` / `team_name` /
@@ -483,8 +514,10 @@ python main.py scrape-elevation
 ```
 
 Fetches `elevation_m` for all stages missing it, then gradient of the final
-km, profile score and profile type for stages missing those. Uses the HTML
-cache, so most will be instant if already scraped. Retrain after.
+km, profile score and profile type for stages missing those, then the
+distance of stages stored without one. Uses the HTML cache, so most will be
+instant if already scraped. Stages more than three weeks ahead are left for a
+later run (`main.ROUTE_HORIZON_DAYS`). Retrain after.
 
 Run it after every scrape that adds stages. The November 2026 run (from the
 Mac, about 50 minutes for 1,389 stages on a cold cache) took the men's stages
@@ -498,6 +531,16 @@ Belgium and Tour of Slovenia sprint stages). The backfill replaces that
 default with the page's profile; until then `features/builder.py` and the
 stage classifier treat such a stage's profile as unknown. After the November
 run no stage with results carries the default any more.
+
+The distance pass was added in November 2026: a stage stored from the stage
+list before PCS showed its distance kept `distance_km = 0` once it had
+results, because `scrape` skips such a stage. 67 stages of April–July 2026
+were left that way (Tour de Suisse, Tour of Belgium, Tour of Slovenia, Tour
+of Turkey, …): distance 0 and no elevation per km for the model. Their pages
+have the distance (Tour of Belgium stage 1: 188.3 km). A stage that still
+carries the default `mountain` label gets a distance only together with the
+profile its page shows, since the missing distance is what marks the label
+as unread.
 
 Two things it does not catch:
 
@@ -561,10 +604,11 @@ accuracy figure worth quoting use `evaluate`, below.
 ### Measure accuracy (walk-forward)
 
 ```bash
-python main.py evaluate                   # men, 2025-01-01 → last result, ~13 min on 8 cores
+python main.py evaluate                   # men, 2025-01-01 → last result, ~9 min on 6 cores
 python main.py evaluate --gender women    # ~2 min
 python main.py evaluate --top10-only      # skip the podium and win models (three times faster)
 python main.py evaluate --folds 2026-01-01,2026-04-01,2026-07-01 --no-save
+python main.py evaluate --hide-route --top10-only   # test stages without their route; prints only
 ```
 
 Every test window (default: six, starting 2025-01-01, 2025-04-01, 2025-07-01,
@@ -573,6 +617,14 @@ models fitted only on stages before the window opens. Features need no
 refitting: each one is computed from results dated before the stage it
 describes (`tests/test_features_v2.py` rewrites a stage's own and all later
 results and checks that its features do not move).
+
+`--hide-route` answers "what is a prediction worth before PCS publishes the
+stage's profile?": the models are fitted as usual, but every test stage is
+built without its profile score, final-km gradient and elevation, so it gets
+the typical values of its profile icon (`features.builder.ROUTE_DEFAULTS`).
+November 2026: 4.24 top-10 hits against 4.67 for the men, 4.82 against 5.02
+for the women; hilly stages lose most (3.67 against 4.32). Nothing is saved
+in that mode, and with `--top10-only` only the top-10 columns mean anything.
 
 It prints, overall and by terrain / tier / race type / season:
 
@@ -617,7 +669,25 @@ python main.py predict race/ronde-van-vlaanderen/2027 --cutoff 2027-04-04
 Stages on or after `--cutoff` are predicted. A stage that has a stored result
 is predicted for the riders in that result; a stage still to be ridden is
 predicted for the PCS start list (riders who did not finish the last ridden
-stage are left out). Both go through the same feature code, so an upcoming
+stage are left out).
+
+For the stages still to be ridden, `predict` first asks PCS for the **route**
+where the database lacks it: profile score, gradient of the final km,
+elevation and distance (`model.predict.refresh_open_stage_routes`, one page
+per stage, `/result` too for a one-day race). The calendar scrape stores only
+the profile icon and sometimes the distance; the rest used to arrive with the
+result, i.e. after the race. The model leans on these facts. What PCS has
+not published yet stays empty; the stage is then predicted as a typical stage
+of its icon (`features.builder.ROUTE_DEFAULTS`), and the output says so.
+
+`predict` therefore writes to the database: after predicting an open race,
+`git status` shows `data/cycling.db` as modified (route facts of its stages,
+nothing else). A stored time-trial label is never replaced (before the stage
+the page of a time trial shows a road icon). If the page cannot be fetched or
+the database is locked by a running scrape, the prediction goes ahead without
+the route.
+
+Ridden and open stages go through the same feature code, so an upcoming
 stage gets exactly the features the model was trained on. In a stage race
 the later stages are predicted with the form and GC known today; re-run after
 each stage's result is scraped.
@@ -639,8 +709,10 @@ The first compares the features built from the start list with those built
 from the stored result (they must be identical; exit code 1 otherwise) —
 run it after touching `features/builder.py` or `model/predict.py`. The
 second opens the UI with that race under Predictions, for a look at the tab
-out of season. Neither needs the network, and the model has seen the race,
-so the probabilities shown are not a test of it.
+out of season; with `PCS_DEMO_HIDE_ROUTE=1` the race also loses its route, so
+the tab shows the note of a stage predicted as a typical one. Neither needs
+the network, and the model has seen the race, so the probabilities shown are
+not a test of it.
 
 ### Predict a women's race
 

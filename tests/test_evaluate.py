@@ -114,3 +114,26 @@ def test_walk_forward_trains_only_on_earlier_stages(monkeypatch):
     assert set(pred["fold"]) == {"2025-01-01", "2025-07-01"}
     assert (pred["tier"] == "WorldTour").all()
     assert stage_scores(pred)["p_at_10"].eq(1.0).all()
+
+
+def test_walk_forward_can_score_a_differently_built_test_frame(monkeypatch):
+    """test_df: the models are fitted on df, the test rows come from the other
+    frame (the same stages built as if their routes were not published)."""
+    import model.evaluate as ev
+    monkeypatch.setattr(ev, "_race_classes", lambda: pd.DataFrame({"race_slug": ["race/a/2025"], "race_class": ["1.UWT"]}))
+    rows = []
+    for sid, d in enumerate(pd.to_datetime(["2024-06-01", "2025-02-01"]), 1):
+        for rider in range(12):
+            rows.append({"stage_id": sid, "rider_id": rider, "rider_name": f"r{rider}", "stage_date": d,
+                         "race_slug": "race/a/2025", "race_name": "A", "profile_type": "flat", "is_stage_race": 0,
+                         "position": rider + 1, "status": "finished", "top10": float(rider < 10), "x": float(-rider)})
+    df = pd.DataFrame(rows)
+    other = df.assign(x=df["x"] * -1)                    # the other frame ranks the riders the wrong way round
+
+    def fitter(train, test, cols):
+        assert (train["x"] <= 0).all()                   # trained on df ...
+        return test["x"].to_numpy()                      # ... scored on test_df
+    same = walk_forward(df, ["x"], fitter, folds=("2025-01-01",), stage_clf=False)
+    swapped = walk_forward(df, ["x"], fitter, folds=("2025-01-01",), stage_clf=False, test_df=other)
+    assert stage_scores(same)["winner_rank"].iloc[0] == 1
+    assert stage_scores(swapped)["winner_rank"].iloc[0] == 12

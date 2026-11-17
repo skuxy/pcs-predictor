@@ -105,6 +105,7 @@ def test_scrape_elevation_replaces_the_unread_mountain_default(tmp_path, monkeyp
     monkeypatch.setattr(races, "fetch_race_stages", lambda slug: [])
     monkeypatch.setattr(races, "fetch_result_meta",
                         lambda slug: {"gradient_final_km": 0.4, "profile_score": 12, "profile_type": "flat"})
+    monkeypatch.setattr(races, "fetch_stage_meta", lambda slug: {})       # the distance backfill: nothing on the page
 
     main.cmd_scrape_elevation(argparse.Namespace())
 
@@ -113,3 +114,79 @@ def test_scrape_elevation_replaces_the_unread_mountain_default(tmp_path, monkeyp
         scores = dict(conn.execute("SELECT id, profile_score FROM stages"))
     assert rows == {1: "flat", 2: "mountain"}       # stage 2 had a distance: its label was read from a page
     assert scores == {1: 12, 2: 12}
+
+
+def test_scrape_elevation_fills_a_missing_distance(tmp_path, monkeypatch):
+    """A stage stored before PCS showed its distance keeps 0 once it has
+    results (scrape skips it).  scrape-elevation takes the distance from the
+    stage page (the /result page for a one-day race).  The stage-list default
+    label is recognised by its missing distance, so it gets a distance only
+    together with the profile its page shows."""
+    import argparse
+    import datetime
+    from contextlib import contextmanager
+    from db import database
+    import scraper.races as races
+    from scraper import utils
+
+    far = (datetime.date.today() + datetime.timedelta(days=main.ROUTE_HORIZON_DAYS + 5)).isoformat()
+    path = str(tmp_path / "d.db")
+    init_db(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("INSERT INTO races (id, pcs_slug, name, year, start_date, end_date, class, is_stage_race) VALUES "
+                     "(1, 'race/tour-de-suisse/2026', 'Tour de Suisse', 2026, '2026-06-17', '2026-06-21', '2.UWT', 1), "
+                     "(2, 'race/gp-de-plumelec/2026', 'GP de Plumelec', 2026, '2026-05-09', '2026-05-09', '1.Pro', 0)")
+        stage = ("INSERT INTO stages (id, race_id, stage_num, pcs_slug, date, distance_km, elevation_m, "
+                 "gradient_final_km, profile_score, profile_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        conn.executemany(stage, [
+            (1, 1, 1, "race/tour-de-suisse/2026/stage-1", "2026-06-17", 0, 2446, 1.9, 202, "hilly"),      # route read, distance missed
+            (2, 1, 2, "race/tour-de-suisse/2026/stage-2", "2026-06-18", 0, 100, 0.0, None, "mountain"),   # default label, page shows no profile
+            (3, 1, 3, "race/tour-de-suisse/2026/stage-3", "2026-06-19", 0, 100, 0.0, None, "mountain"),   # default label, page shows it
+            (4, 2, 1, "race/gp-de-plumelec/2026", "2026-05-09", 0, 2433, 6.2, 126, "hilly"),              # one-day race
+            (5, 1, 5, "race/tour-de-suisse/2026/stage-5", far, 0, 100, 0.0, 30, "flat"),                  # too far ahead
+            (6, 1, 4, "race/tour-de-suisse/2026/stage-4", "2026-06-20", 10.5, 202, 0.9, 10, "itt"),       # has a distance
+        ])
+        conn.commit()
+
+    @contextmanager
+    def _conn(db_path=path):
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
+
+    pages = {
+        "race/tour-de-suisse/2026/stage-1": {"distance_km": 171.2, "profile_type": "mountain"},
+        "race/tour-de-suisse/2026/stage-2": {"distance_km": 150.0, "profile_type": None},
+        "race/tour-de-suisse/2026/stage-3": {"distance_km": 160.0, "profile_type": "flat"},
+        "race/gp-de-plumelec/2026": {"distance_km": None},
+        "race/gp-de-plumelec/2026/result": {"distance_km": 198.5, "profile_type": "hilly"},
+    }
+    seen = []
+
+    def fake_meta(slug):
+        seen.append((slug, utils._stale_through))
+        return dict(pages.get(slug, {}))
+
+    monkeypatch.setattr(database, "get_conn", _conn)
+    monkeypatch.setattr(races, "fetch_stage_elevation", lambda slug: None)
+    monkeypatch.setattr(races, "fetch_race_stages", lambda slug: [])
+    monkeypatch.setattr(races, "fetch_result_meta", lambda slug: {})
+    monkeypatch.setattr(races, "fetch_stage_meta", fake_meta)
+
+    main.cmd_scrape_elevation(argparse.Namespace())
+
+    with sqlite3.connect(path) as conn:
+        got = {i: (d, p) for i, d, p in conn.execute("SELECT id, distance_km, profile_type FROM stages")}
+    assert got[1] == (171.2, "hilly")           # the stored label was read from a page: kept
+    assert got[2] == (0, "mountain")            # no profile on the page: still recognisable as unread
+    assert got[3] == (160.0, "flat")
+    assert got[4] == (198.5, "hilly")
+    assert got[5] == (0, "flat") and got[6] == (10.5, "itt")
+    assert [slug for slug, _ in seen] == [
+        "race/tour-de-suisse/2026/stage-1", "race/tour-de-suisse/2026/stage-2", "race/tour-de-suisse/2026/stage-3",
+        "race/gp-de-plumelec/2026", "race/gp-de-plumelec/2026/result"]
+    assert dict(seen)["race/tour-de-suisse/2026/stage-1"] == "2026-06-17"      # a copy from before the stage is not used

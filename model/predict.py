@@ -8,9 +8,11 @@ import numpy as np
 import pandas as pd
 
 from features.builder import build_features
-from db.database import get_conn
+from db.database import fill_stage_meta, get_conn
 from model.train import model_paths
+from scraper.races import fetch_stage_meta
 from scraper.startlist import fetch_startlist
+from scraper.utils import pages_newer_than
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +94,91 @@ def startlist_entries(race_slug: str, cutoff_date: str) -> tuple[pd.DataFrame, d
     return entries[["stage_id", "rider_id", "bib", "team_slug"]], names
 
 
+# What a stage page says about the route.  The calendar scrape stores the
+# profile icon and (sometimes) the distance; the rest arrives with the result
+# unless it is asked for before the race.
+ROUTE_FACTS = ("distance_km", "elevation_m", "profile_type", "gradient_final_km", "profile_score",
+               "departure", "arrival")
+
+
+# Shown with a prediction whose stage has no profile score in the database
+# (the sizes: `main.py evaluate --hide-route`, results/accuracy_2026-11.md).
+ROUTE_UNKNOWN_NOTE = ("This stage's profile (profile score, final-km gradient, elevation) is not in the database: "
+                      "it is predicted as a typical stage of its kind, at about 0.4 fewer top-10 hits (0.65 on "
+                      "hilly stages). For a stage still to come, run again once PCS has published the route.")
+
+
+def _route_from_pcs(row) -> dict:
+    """What the page of an open stage says about its route, limited to what
+    may be stored over the row ``row`` of the stages table."""
+    slug = row["pcs_slug"]
+    with pages_newer_than(row["date"]):
+        facts = fetch_stage_meta(slug)
+        one_day = not any(part in slug for part in ("/stage-", "/prologue"))
+        if one_day and facts.get("profile_score") is None and facts.get("gradient_final_km") is None:
+            for key, value in fetch_stage_meta(f"{slug}/result").items():
+                if facts.get(key) is None:
+                    facts[key] = value
+    # 0 is a real profile score and a real gradient, but not a distance
+    facts = {k: v for k in ROUTE_FACTS
+             if (v := facts.get(k)) is not None and not (k == "distance_km" and v == 0)}
+    # A time trial is known from the stage's name in the stage list ("(ITT)",
+    # "(TTT)", "Prologue").  Before the stage its page has no "Won how" and
+    # shows a road icon, which must not replace that label.
+    if row["profile_type"] in ("itt", "ttt"):
+        facts.pop("profile_type", None)
+    # 'mountain' with no profile score and no distance is the stage-list
+    # default, "profile unknown" to the feature builder for as long as the
+    # distance is missing: a distance is not stored without the icon (or the
+    # score) that tells what the stage is.
+    unread = row["profile_type"] == "mountain" and row["profile_score"] is None and not row["distance_km"]
+    if unread and "profile_type" not in facts and "profile_score" not in facts:
+        facts.pop("distance_km", None)
+    return facts
+
+
+def refresh_open_stage_routes(stage_ids) -> int:
+    """Ask PCS for the route of stages still to be ridden that lack part of it.
+
+    The models lean on a stage's profile score, the gradient of its final km
+    and its elevation; without them a stage is predicted as a typical stage
+    of its profile icon (features.builder.ROUTE_DEFAULTS), about 0.4 top-10
+    hits worse.  For each stage in ``stage_ids`` missing one of these, the
+    stage page is fetched afresh (``/result`` too for a one-day race) and
+    what it says is written to the stages table; a fact PCS does not show yet
+    stays empty.  Returns the number of stages that gained a fact.  A page
+    that cannot be fetched, or a database that cannot be written (another
+    command holds it), is logged and skipped: the prediction goes ahead.
+    """
+    ids = [int(i) for i in stage_ids]
+    if not ids:
+        return 0
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"""SELECT id, pcs_slug, date, distance_km, elevation_m, gradient_final_km, profile_score, profile_type
+                FROM stages WHERE id IN ({','.join('?' * len(ids))})
+                  AND (profile_score IS NULL OR gradient_final_km IS NULL OR elevation_m IS NULL
+                       OR COALESCE(distance_km, 0) = 0)""", ids).fetchall()
+    updated = 0
+    for row in rows:
+        slug = row["pcs_slug"]
+        try:
+            facts = _route_from_pcs(row)
+            gained = [k for k in ("profile_score", "gradient_final_km", "elevation_m", "distance_km")
+                      if k in facts and (row[k] is None or (k == "distance_km" and not row[k]))]
+            if not gained:
+                log.info("route of %s: PCS has nothing new", slug)
+                continue
+            with get_conn() as conn:
+                fill_stage_meta(conn, row["id"], facts, overwrite=True)
+        except Exception as exc:                     # neither the network nor a locked database may break a prediction
+            log.warning("route of %s could not be refreshed: %s", slug, exc)
+            continue
+        updated += 1
+        log.info("route of %s: stored %s", slug, ", ".join(f"{k}={facts[k]}" for k in gained))
+    return updated
+
+
 def predict_race(race_slug: str, cutoff_date: str, gender: str = "men") -> pd.DataFrame:
     """
     Predict top-10 probabilities for all starters in a race.
@@ -99,8 +186,9 @@ def predict_race(race_slug: str, cutoff_date: str, gender: str = "men") -> pd.Da
     Stages with a stored result are predicted from that result's riders (a
     backtest); stages still to be ridden from the PCS start list.  Both go
     through ``features.builder.build_features``, so an upcoming stage gets
-    exactly the features the model was trained on.  Team time trials are
-    left out.
+    exactly the features the model was trained on.  The route of the open
+    stages (profile score, final-km gradient, elevation) is fetched first
+    where the database lacks it.  Team time trials are left out.
     """
     model_path, meta_path, _ = model_paths(gender)
     if not model_path.exists():
@@ -116,6 +204,9 @@ def predict_race(race_slug: str, cutoff_date: str, gender: str = "men") -> pd.Da
     top3_model = _load_model(top3_path)
 
     entries, names = startlist_entries(race_slug, cutoff_date)
+    if len(entries):
+        # PCS answered for the start list: get the route of the open stages too
+        refresh_open_stage_routes(entries["stage_id"].unique())
     log.info("building features for %s (gender=%s, %d start-list rows) …", race_slug, gender, len(entries))
     df = build_features(cutoff_date=cutoff_date, race_slug=race_slug, gender=gender,
                         entries=entries if len(entries) else None)
@@ -267,6 +358,8 @@ def print_predictions(df: pd.DataFrame, top_n: int = 15) -> None:
         profile = group["profile_type"].iloc[0] if "profile_type" in group.columns else "?"
         print(f"\n{'='*65}")
         print(f"  {race}  |  Stage {str(stage_date)[:10]}  |  {profile}")
+        if "route_known" in group.columns and not group["route_known"].all():
+            print(f"  {ROUTE_UNKNOWN_NOTE}")
         print(f"{'='*65}")
         print(f"  {'Rank':>4}  {'Rider':<30}  {'P(top10)':>8}  {'Actual':>8}")
         print(f"  {'-'*55}")

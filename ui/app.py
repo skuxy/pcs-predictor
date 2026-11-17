@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT))
 from db.database import get_conn
 from model.evaluate import evaluation_path, stage_scores
 from model.predict import (
-    backtest_predictions, model_info, predict_race, SOURCE_SEEN, SOURCE_WALK_FORWARD,
+    backtest_predictions, model_info, predict_race, ROUTE_UNKNOWN_NOTE, SOURCE_SEEN, SOURCE_WALK_FORWARD,
 )
 from model.train import model_paths
 
@@ -206,6 +206,8 @@ with tab_pred:
             else:
                 for stage_date, group in df.groupby("stage_date"):
                     st.markdown(f"**{stage_label(group, stage_date)}**")
+                    if "route_known" in group.columns and not group["route_known"].all():
+                        st.caption(f"⚠️ {ROUTE_UNKNOWN_NOTE}")
                     group = group.copy()
                     # Fair decimal odds for a top-10 finish
                     group["fair_odds"] = (1.0 / group["top10_prob"].where(group["top10_prob"] > 0)).round(2)
