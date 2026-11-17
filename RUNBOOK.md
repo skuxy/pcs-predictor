@@ -110,8 +110,8 @@ in November 2026 from a cloud VM: the first page of a new browser session
 loads, every later one is answered 403 with a Turnstile check; plain
 `requests` get 403 at once). The scraper gives up on those URLs and stores
 nothing for them, so it is safe to stop and re-run later from a network PCS
-accepts (the same commands worked from a laptop and through the October
-proxy). Nothing else depends on it: training, `evaluate`, backtests and the UI
+accepts: on 16 November 2026 the same commands ran from a laptop without a
+single challenge (plain requests, no browser). Nothing else depends on it: training, `evaluate`, backtests and the UI
 only read the database.
 
 Environment knobs:
@@ -486,17 +486,37 @@ Fetches `elevation_m` for all stages missing it, then gradient of the final
 km, profile score and profile type for stages missing those. Uses the HTML
 cache, so most will be instant if already scraped. Retrain after.
 
-This is the most useful data job still open (November 2026): of the men's
-stages, 46% have no profile score and 60% no elevation — almost all 2.1 and
-2.Pro stage races (11–15% covered, against 97% of WorldTour stages) — so for
-half the calendar the model knows a stage only as "flat / hilly / mountain".
+Run it after every scrape that adds stages. The November 2026 run (from the
+Mac, about 50 minutes for 1,389 stages on a cold cache) took the men's stages
+with results from 59% to 97% with a profile score and from 42% to 99% with an
+elevation — before it, 2.1 and 2.Pro stage races were 11–15% covered — and
+was worth +0.2 top-10 hits per stage in the walk-forward test.
+
 It also repairs a wrong label: a stage that came from the stage list and
 whose page was never read is stored as `mountain` with distance 0 (Tour of
-Belgium and Tour of Slovenia sprint stages, Chrono des Nations; about 45
-men's stages of 2026 with results, 58% of which ended in a bunch sprint). The
-backfill replaces that default with the page's profile; until then
-`features/builder.py` and the stage classifier treat such a stage's profile
-as unknown. Expect about 1,400 stage pages (over an hour) on a cold cache.
+Belgium and Tour of Slovenia sprint stages). The backfill replaces that
+default with the page's profile; until then `features/builder.py` and the
+stage classifier treat such a stage's profile as unknown. After the November
+run no stage with results carries the default any more.
+
+Two things it does not catch:
+
+- A stage whose page PCS answers with HTTP 500 stays as it is (in November
+  2026 mainly Tour of Holland 2025–2026, Simac Ladies Tour 2026 and
+  International Tour of Hellas 2023–2026).
+- A one-day time trial whose page has no "Won how" line gets the label of its
+  parcours icon. Chrono des Nations 2023 and 2026 and stage 2 of the Tour de
+  Suisse Women 2023 and 2024 were set to `itt` by hand. To look for more
+  (road-labelled, under 60 km, only the winner on his own time):
+
+  ```sql
+  SELECT s.pcs_slug, s.profile_type, s.distance_km
+  FROM stages s JOIN results x ON x.stage_id = s.id AND x.status = 'finished'
+  WHERE s.profile_type IN ('flat', 'hilly', 'mountain') AND s.distance_km BETWEEN 1 AND 60
+  GROUP BY s.id
+  HAVING COUNT(*) >= 15 AND SUM(x.time_seconds = 0) = 1
+     AND COUNT(DISTINCT CASE WHEN x.position <= 10 THEN x.time_seconds END) >= 9;
+  ```
 
 ### Tag cobbled/gravel stages
 

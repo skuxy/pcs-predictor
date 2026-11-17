@@ -69,31 +69,30 @@ For upcoming races the model loads the published start list and builds the same 
 
 Walk-forward test on the 2025 and 2026 seasons: every stage is predicted by models trained only on stages before its part of the season (`python main.py evaluate`; details and the effect of each change in [results/accuracy_2026-11.md](results/accuracy_2026-11.md)).
 
-| Per stage | Men (939 stages) | Women (213 stages) | Random |
+| Per stage | Men (947 stages) | Women (213 stages) | Random |
 |-----------|------------------|--------------------|--------|
-| Of the model's 10 picks, finished in the top 10 | 4.36 | 4.85 | 0.8–0.9 |
-| Of its 3 podium picks, finished on the podium | 1.01 | 1.16 | |
-| Winner was its first pick | 27% | 35% | |
-| Winner among its first 3 picks | 48% | 58% | |
-| AUC | 0.872 | 0.885 | 0.5 |
+| Of the model's 10 picks, finished in the top 10 | 4.56 | 4.91 | 0.8–0.9 |
+| Of its 3 podium picks, finished on the podium | 1.05 | 1.17 | |
+| Winner was its first pick | 26% | 33% | |
+| Winner among its first 3 picks | 49% | 54% | |
+| AUC | 0.879 | 0.887 | 0.5 |
 
-**Top-10 hits** (precision@10): of the model's top-10 picks for a stage, how many actually finished top-10. Ranking riders by their PCS points of the last year alone gets 3.31 for the men, by an Elo rating 3.36.
+**Top-10 hits** (precision@10): of the model's top-10 picks for a stage, how many actually finished top-10. Ranking riders by their PCS points of the last year alone gets 3.32 for the men, by an Elo rating 3.37.
 
 **AUC** (area under the ROC curve): probability that the model ranks an actual top-10 finisher above a rider outside the top 10. 0.5 = random, 1.0 = perfect.
 
-The probabilities are calibrated: of the riders given P(top 10) between 0.3 and 0.4, 35% finished in the top 10.
+The probabilities are calibrated: of the riders given P(top 10) between 0.3 and 0.4, 36% finished in the top 10. The winner figures are the noisy ones (about ±1 point for the men, ±3 for the women between runs).
 
 ### By terrain (men)
 
 | Terrain | Stages | Top-10 hits | Winner called | AUC |
 |---------|--------|-------------|---------------|-----|
-| Time trial | 55 | 5.44 | 36% | 0.914 |
-| Flat | 150 | 4.96 | 35% | 0.895 |
-| Mountain | 175 | 4.84 | 26% | 0.890 |
-| Hilly | 529 | 4.00 | 25% | 0.858 |
-| Profile unknown | 30 | 2.87 | 17% | 0.802 |
+| Time trial | 56 | 5.50 | 34% | 0.915 |
+| Flat | 152 | 5.09 | 28% | 0.898 |
+| Mountain | 183 | 5.09 | 24% | 0.899 |
+| Hilly | 556 | 4.14 | 25% | 0.863 |
 
-Time trials and flat stages are the most predictable. Hilly stages are hardest — the label covers both bunch sprints and punchy small-group finishes, and the fields are deep.
+Time trials, flat and mountain stages are the most predictable. Hilly stages are hardest — the label covers both bunch sprints and punchy small-group finishes, and the fields are deep.
 
 A backtest of a single race in the UI or with `main.py backtest` says whether its numbers are out of sample. The model on disk is trained on every stored result, so scoring it on a race it has seen says little.
 
@@ -260,7 +259,6 @@ python main.py init        # create the SQLite schema
 
 - **Hilly stages** are the hardest to predict — half of them end in a bunch sprint and half in a small group, and the fields are deep
 - **Breakaway winners** are not predictable from results: on about one stage in eight the winner sits outside the model's first 30 picks
-- **Thin stage data below the WorldTour** — profile score and elevation are missing for most 2.1 / 2.Pro stage races until `python main.py scrape-elevation` is run (see RUNBOOK)
 - **New riders** (sparse history) get mostly empty features and land in the middle of predictions
 - **Rider profiles** (age, weight, height) are stored for a quarter of the riders only, so they carry no weight yet
 - **Women's racing** has a quarter of the men's data, so its numbers are noisier
