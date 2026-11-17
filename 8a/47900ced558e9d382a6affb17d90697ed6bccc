@@ -1,0 +1,19 @@
+model/metrics.json
+  s_287fcc189eff0d::t_71c3d5e60d6fdd 6-7,10-39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8a47900ced558e9d382a6affb17d90697ed6bccc",
+  "prompts": {},
+  "sessions": {
+    "s_287fcc189eff0d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "720f2c70-4fef-4a14-b574-bd38e7ae3f26",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Borna Skukan <bskukan@daytona.io>"
+    }
+  }
+}
