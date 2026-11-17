@@ -5,5 +5,5 @@
   "target": "win",
   "train_rows": 50777,
   "train_stages": 450,
-  "n_features": 173
+  "n_features": 184
 }

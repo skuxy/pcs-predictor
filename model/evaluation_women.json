@@ -7,233 +7,232 @@
  "overall": {
   "group": "all",
   "stages": 213.0,
-  "p_at_10": 0.4911,
-  "hits3": 1.169,
-  "win_top1": 0.3333,
-  "win_top3": 0.5352,
+  "p_at_10": 0.5019,
+  "hits3": 1.2394,
+  "win_top1": 0.3521,
+  "win_top3": 0.5681,
   "win_top10": 0.7793,
   "winner_rank_median": 3.0,
-  "auc": 0.8874,
-  "ndcg10": 0.5656
+  "auc": 0.8909,
+  "ndcg10": 0.5705
  },
  "by_profile": [
   {
    "group": "flat",
    "stages": 48.0,
-   "p_at_10": 0.5062,
-   "hits3": 1.3542,
+   "p_at_10": 0.5167,
+   "hits3": 1.3333,
    "win_top1": 0.4583,
-   "win_top3": 0.6667,
+   "win_top3": 0.6458,
    "win_top10": 0.7292,
    "winner_rank_median": 2.0,
-   "auc": 0.8809,
-   "ndcg10": 0.6186
+   "auc": 0.8816,
+   "ndcg10": 0.6136
   },
   {
    "group": "hilly",
    "stages": 126.0,
-   "p_at_10": 0.4714,
-   "hits3": 1.0873,
+   "p_at_10": 0.4762,
+   "hits3": 1.1349,
    "win_top1": 0.2937,
-   "win_top3": 0.4524,
+   "win_top3": 0.5,
    "win_top10": 0.7698,
-   "winner_rank_median": 4.0,
-   "auc": 0.8856,
-   "ndcg10": 0.5317
+   "winner_rank_median": 3.5,
+   "auc": 0.8897,
+   "ndcg10": 0.5348
   },
   {
    "group": "itt",
    "stages": 14.0,
-   "p_at_10": 0.5286,
-   "hits3": 1.5714,
-   "win_top1": 0.2857,
+   "p_at_10": 0.55,
+   "hits3": 1.7143,
+   "win_top1": 0.4286,
    "win_top3": 0.7857,
    "win_top10": 0.9286,
    "winner_rank_median": 2.5,
-   "auc": 0.8842,
-   "ndcg10": 0.6311
+   "auc": 0.878,
+   "ndcg10": 0.6464
   },
   {
    "group": "mountain",
    "stages": 25.0,
-   "p_at_10": 0.54,
-   "hits3": 1.0,
-   "win_top1": 0.32,
-   "win_top3": 0.56,
+   "p_at_10": 0.576,
+   "hits3": 1.32,
+   "win_top1": 0.4,
+   "win_top3": 0.64,
    "win_top10": 0.84,
-   "winner_rank_median": 3.0,
-   "auc": 0.911,
-   "ndcg10": 0.5978
+   "winner_rank_median": 2.0,
+   "auc": 0.9222,
+   "ndcg10": 0.6252
   }
  ],
  "by_tier": [
   {
    "group": ".1",
    "stages": 59.0,
-   "p_at_10": 0.5153,
-   "hits3": 1.1186,
-   "win_top1": 0.2373,
-   "win_top3": 0.5085,
-   "win_top10": 0.7627,
+   "p_at_10": 0.5169,
+   "hits3": 1.2373,
+   "win_top1": 0.2881,
+   "win_top3": 0.5593,
+   "win_top10": 0.7797,
    "winner_rank_median": 3.0,
-   "auc": 0.8855,
-   "ndcg10": 0.5815
+   "auc": 0.8848,
+   "ndcg10": 0.5841
   },
   {
    "group": "ProSeries",
    "stages": 38.0,
-   "p_at_10": 0.4553,
-   "hits3": 1.2105,
-   "win_top1": 0.3421,
+   "p_at_10": 0.4526,
+   "hits3": 1.1316,
+   "win_top1": 0.2632,
    "win_top3": 0.5,
-   "win_top10": 0.7895,
+   "win_top10": 0.7632,
    "winner_rank_median": 3.5,
-   "auc": 0.8678,
-   "ndcg10": 0.5505
+   "auc": 0.8722,
+   "ndcg10": 0.5319
   },
   {
    "group": "WorldTour",
    "stages": 116.0,
-   "p_at_10": 0.4905,
-   "hits3": 1.181,
-   "win_top1": 0.3793,
-   "win_top3": 0.5603,
+   "p_at_10": 0.5103,
+   "hits3": 1.2759,
+   "win_top1": 0.4138,
+   "win_top3": 0.5948,
    "win_top10": 0.7845,
    "winner_rank_median": 2.0,
-   "auc": 0.8949,
-   "ndcg10": 0.5624
+   "auc": 0.9001,
+   "ndcg10": 0.5763
   }
  ],
  "by_race_type": [
   {
    "group": "one-day",
    "stages": 54.0,
-   "p_at_10": 0.487,
-   "hits3": 1.1481,
-   "win_top1": 0.2778,
-   "win_top3": 0.4259,
-   "win_top10": 0.7037,
+   "p_at_10": 0.4907,
+   "hits3": 1.1852,
+   "win_top1": 0.2593,
+   "win_top3": 0.4444,
+   "win_top10": 0.6667,
    "winner_rank_median": 4.0,
-   "auc": 0.8864,
-   "ndcg10": 0.5638
+   "auc": 0.8892,
+   "ndcg10": 0.5652
   },
   {
    "group": "stage race",
    "stages": 159.0,
-   "p_at_10": 0.4925,
-   "hits3": 1.1761,
-   "win_top1": 0.3522,
-   "win_top3": 0.5723,
-   "win_top10": 0.805,
-   "winner_rank_median": 2.0,
-   "auc": 0.8878,
-   "ndcg10": 0.5662
+   "p_at_10": 0.5057,
+   "hits3": 1.2579,
+   "win_top1": 0.3836,
+   "win_top3": 0.6101,
+   "win_top10": 0.8176,
+   "winner_rank_median": 3.0,
+   "auc": 0.8915,
+   "ndcg10": 0.5723
   }
  ],
  "by_year": [
   {
    "group": 2025,
    "stages": 94.0,
-   "p_at_10": 0.4649,
-   "hits3": 1.2021,
-   "win_top1": 0.234,
-   "win_top3": 0.4574,
+   "p_at_10": 0.4798,
+   "hits3": 1.2766,
+   "win_top1": 0.3085,
+   "win_top3": 0.5213,
    "win_top10": 0.7766,
-   "winner_rank_median": 4.0,
-   "auc": 0.8803,
-   "ndcg10": 0.5498
+   "winner_rank_median": 3.0,
+   "auc": 0.8834,
+   "ndcg10": 0.5539
   },
   {
    "group": 2026,
    "stages": 119.0,
-   "p_at_10": 0.5118,
-   "hits3": 1.1429,
-   "win_top1": 0.4118,
-   "win_top3": 0.5966,
+   "p_at_10": 0.5193,
+   "hits3": 1.2101,
+   "win_top1": 0.3866,
+   "win_top3": 0.605,
    "win_top10": 0.7815,
    "winner_rank_median": 2.0,
-   "auc": 0.8931,
-   "ndcg10": 0.578
+   "auc": 0.8968,
+   "ndcg10": 0.5837
   }
  ],
  "hits10_distribution": {
-  "0": 1,
-  "1": 5,
-  "2": 9,
-  "3": 26,
-  "4": 47,
-  "5": 48,
-  "6": 41,
-  "7": 22,
+  "1": 3,
+  "2": 11,
+  "3": 21,
+  "4": 48,
+  "5": 47,
+  "6": 46,
+  "7": 23,
   "8": 10,
   "9": 3,
   "10": 1
  },
  "calibration": {
-  "brier": 0.05834183606245117,
-  "log_loss": 0.1987064362589501,
-  "ece": 0.004710709772900117,
-  "mean_prob_sum_per_stage": 10.005668753962384,
+  "brier": 0.05750557499763395,
+  "log_loss": 0.19556900907021402,
+  "ece": 0.005349762648060888,
+  "mean_prob_sum_per_stage": 10.003583256771861,
   "reliability": [
    {
     "bin": "0.0\u20130.1",
-    "n": 18005,
-    "predicted": 0.0235,
-    "actual": 0.0203
+    "n": 18048,
+    "predicted": 0.0226,
+    "actual": 0.0196
    },
    {
     "bin": "0.1\u20130.2",
-    "n": 2592,
-    "predicted": 0.1431,
-    "actual": 0.1439
+    "n": 2563,
+    "predicted": 0.1452,
+    "actual": 0.1467
    },
    {
     "bin": "0.2\u20130.3",
-    "n": 1381,
-    "predicted": 0.2459,
-    "actual": 0.2527
+    "n": 1313,
+    "predicted": 0.2443,
+    "actual": 0.2384
    },
    {
     "bin": "0.3\u20130.4",
-    "n": 794,
+    "n": 816,
     "predicted": 0.3457,
-    "actual": 0.3514
+    "actual": 0.3578
    },
    {
     "bin": "0.4\u20130.5",
-    "n": 516,
-    "predicted": 0.4467,
-    "actual": 0.4632
+    "n": 505,
+    "predicted": 0.4474,
+    "actual": 0.4733
    },
    {
     "bin": "0.5\u20130.6",
-    "n": 343,
-    "predicted": 0.5476,
-    "actual": 0.6093
+    "n": 370,
+    "predicted": 0.5483,
+    "actual": 0.5838
    },
    {
     "bin": "0.6\u20130.7",
-    "n": 262,
-    "predicted": 0.6457,
-    "actual": 0.6718
+    "n": 276,
+    "predicted": 0.6472,
+    "actual": 0.721
    },
    {
     "bin": "0.7\u20130.8",
-    "n": 132,
-    "predicted": 0.7394,
-    "actual": 0.7652
+    "n": 123,
+    "predicted": 0.7417,
+    "actual": 0.7724
    },
    {
     "bin": "0.8\u20130.9",
-    "n": 38,
-    "predicted": 0.8387,
-    "actual": 0.8421
+    "n": 43,
+    "predicted": 0.845,
+    "actual": 0.8372
    },
    {
     "bin": "0.9\u20131.0",
-    "n": 7,
-    "predicted": 0.9516,
-    "actual": 0.8571
+    "n": 13,
+    "predicted": 0.9335,
+    "actual": 0.7692
    }
   ]
  },
@@ -293,7 +292,8 @@
    "top3",
    "win"
   ],
-  "n_features": 173,
+  "n_features": 184,
+  "hide_route": false,
   "model": {
    "type": "HistGradientBoostingClassifier \u00d7 5, isotonic-calibrated",
    "max_iter": 400,

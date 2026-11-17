@@ -34,7 +34,7 @@ Race calendars, stage lists, results, and rider profiles are fetched from a publ
 
 ### 2. Engineer features
 
-A feature vector (173 columns) is built for each (rider, stage) pair using only results dated before the stage:
+A feature vector (184 columns) is built for each (rider, stage) pair using only results dated before the stage:
 
 | Feature group | Examples |
 |---------------|---------|
@@ -43,6 +43,7 @@ A feature vector (173 columns) is built for each (rider, stage) pair using only 
 | **Elo-style ratings** | overall, bunch sprint, small group, time trial, mountain, cobbles — a result counts for more against a stronger field |
 | **Finish-type skills** | top-10 rate and points in stages that ended in a bunch sprint vs a small group (from how each past stage was actually decided) |
 | **Profile affinity** | results on flat / hilly / mountain / TT stages, and on the same profile + surface as the target stage |
+| **Stages like this one** | earlier results weighted by how close the stage's profile score and final-km gradient were to the target stage's |
 | **Race history** | earlier editions of the same race; earlier stages of this edition; GC position and deficit before the stage |
 | **Team role** | rank within the team by strength, share of the team's points, leader bib |
 | **Standing in the field** | percentile of the key strength features among today's starters; quality of the field |
@@ -71,26 +72,28 @@ Walk-forward test on the 2025 and 2026 seasons: every stage is predicted by mode
 
 | Per stage | Men (947 stages) | Women (213 stages) | Random |
 |-----------|------------------|--------------------|--------|
-| Of the model's 10 picks, finished in the top 10 | 4.56 | 4.91 | 0.8–0.9 |
-| Of its 3 podium picks, finished on the podium | 1.05 | 1.17 | |
-| Winner was its first pick | 26% | 33% | |
-| Winner among its first 3 picks | 49% | 54% | |
-| AUC | 0.879 | 0.887 | 0.5 |
+| Of the model's 10 picks, finished in the top 10 | 4.67 | 5.02 | 0.8–0.9 |
+| Of its 3 podium picks, finished on the podium | 1.07 | 1.24 | |
+| Winner was its first pick | 27% | 35% | |
+| Winner among its first 3 picks | 49% | 57% | |
+| AUC | 0.884 | 0.891 | 0.5 |
 
 **Top-10 hits** (precision@10): of the model's top-10 picks for a stage, how many actually finished top-10. Ranking riders by their PCS points of the last year alone gets 3.32 for the men, by an Elo rating 3.37.
 
 **AUC** (area under the ROC curve): probability that the model ranks an actual top-10 finisher above a rider outside the top 10. 0.5 = random, 1.0 = perfect.
 
-The probabilities are calibrated: of the riders given P(top 10) between 0.3 and 0.4, 36% finished in the top 10. The winner figures are the noisy ones (about ±1 point for the men, ±3 for the women between runs).
+The probabilities are calibrated: of the riders given P(top 10) between 0.3 and 0.4, 35% finished in the top 10. The winner figures are the noisy ones (about ±1 point for the men, ±3 for the women between runs).
+
+These figures are for stages whose route is known (profile score, gradient of the final km, elevation). `predict` fetches the route of an upcoming stage from PCS; a stage PCS has not published a profile for is predicted as a typical stage of its kind and scores 4.24 top-10 hits (men) and 4.82 (women) in the same test (`python main.py evaluate --hide-route`).
 
 ### By terrain (men)
 
 | Terrain | Stages | Top-10 hits | Winner called | AUC |
 |---------|--------|-------------|---------------|-----|
-| Time trial | 56 | 5.50 | 34% | 0.915 |
-| Flat | 152 | 5.09 | 28% | 0.898 |
-| Mountain | 183 | 5.09 | 24% | 0.899 |
-| Hilly | 556 | 4.14 | 25% | 0.863 |
+| Time trial | 56 | 5.71 | 41% | 0.921 |
+| Mountain | 183 | 5.10 | 23% | 0.904 |
+| Flat | 152 | 5.03 | 28% | 0.900 |
+| Hilly | 556 | 4.32 | 26% | 0.870 |
 
 Time trials, flat and mountain stages are the most predictable. Hilly stages are hardest — the label covers both bunch sprints and punchy small-group finishes, and the fields are deep.
 
@@ -152,7 +155,7 @@ All commands run from the project root with the virtual environment active.
 python main.py scrape --years 2026
 python main.py scrape --years 2026 --gender women
 
-# Backfill elevation data for newly scraped stages
+# Backfill route data for newly scraped stages (elevation, final-km gradient, profile score, distance)
 python main.py scrape-elevation
 
 # Tag cobbled/gravel stages
@@ -166,7 +169,7 @@ python main.py train --gender women
 python main.py evaluate
 python main.py evaluate --gender women
 
-# Predict (stages on or after the cutoff; open stages from the PCS start list)
+# Predict (stages on or after the cutoff; open stages from the PCS start list, their route fetched first)
 python main.py predict race/ronde-van-vlaanderen/2027 --cutoff 2027-04-04
 
 # Backtest one past race (says whether the numbers are out of sample)
@@ -263,3 +266,4 @@ python main.py init        # create the SQLite schema
 - **Rider profiles** (age, weight, height) are stored for a quarter of the riders only, so they carry no weight yet
 - **Women's racing** has a quarter of the men's data, so its numbers are noisier
 - **In a stage race** later stages are predicted with today's form and GC; re-run after each stage
+- **A stage without a published profile** is predicted as a typical stage of its kind, at about 0.4 top-10 hits less (0.65 on hilly stages); the prediction says so, run it again closer to the race

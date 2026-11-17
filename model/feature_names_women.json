@@ -171,5 +171,16 @@
   "elo_exp",
   "elo_exp_frank",
   "elo_exp_gap",
-  "team_rank_elo_exp"
+  "team_rank_elo_exp",
+  "sim_pct",
+  "sim_top10",
+  "sim_pts",
+  "sim_n",
+  "simg_pct",
+  "simg_top10",
+  "simg_pts",
+  "simg_n",
+  "sim_pct_frank",
+  "sim_pts_frank",
+  "simg_pct_frank"
 ]
