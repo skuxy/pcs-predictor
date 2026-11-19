@@ -535,7 +535,7 @@ run no stage with results carries the default any more.
 The distance pass was added in November 2026: a stage stored from the stage
 list before PCS showed its distance kept `distance_km = 0` once it had
 results, because `scrape` skips such a stage. 67 stages of April–July 2026
-were left that way (Tour de Suisse, Tour of Belgium, Tour of Slovenia, Tour
+were left that way until the run of 19 November 2026 filled them (Tour de Suisse, Tour of Belgium, Tour of Slovenia, Tour
 of Turkey, …): distance 0 and no elevation per km for the model. Their pages
 have the distance (Tour of Belgium stage 1: 188.3 km). A stage that still
 carries the default `mountain` label gets a distance only together with the
@@ -622,8 +622,8 @@ results and checks that its features do not move).
 stage's profile?": the models are fitted as usual, but every test stage is
 built without its profile score, final-km gradient and elevation, so it gets
 the typical values of its profile icon (`features.builder.ROUTE_DEFAULTS`).
-November 2026: 4.24 top-10 hits against 4.67 for the men, 4.82 against 5.02
-for the women; hilly stages lose most (3.67 against 4.32). Nothing is saved
+November 2026: 4.25 top-10 hits against 4.69 for the men, 4.82 against 5.03
+for the women; hilly stages lose most (3.70 against 4.36). Nothing is saved
 in that mode, and with `--top10-only` only the top-10 columns mean anything.
 
 It prints, overall and by terrain / tier / race type / season:

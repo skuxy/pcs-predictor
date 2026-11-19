@@ -72,11 +72,11 @@ Walk-forward test on the 2025 and 2026 seasons: every stage is predicted by mode
 
 | Per stage | Men (947 stages) | Women (213 stages) | Random |
 |-----------|------------------|--------------------|--------|
-| Of the model's 10 picks, finished in the top 10 | 4.67 | 5.02 | 0.8–0.9 |
-| Of its 3 podium picks, finished on the podium | 1.07 | 1.24 | |
+| Of the model's 10 picks, finished in the top 10 | 4.69 | 5.03 | 0.8–0.9 |
+| Of its 3 podium picks, finished on the podium | 1.09 | 1.23 | |
 | Winner was its first pick | 27% | 35% | |
 | Winner among its first 3 picks | 49% | 57% | |
-| AUC | 0.884 | 0.891 | 0.5 |
+| AUC | 0.885 | 0.891 | 0.5 |
 
 **Top-10 hits** (precision@10): of the model's top-10 picks for a stage, how many actually finished top-10. Ranking riders by their PCS points of the last year alone gets 3.32 for the men, by an Elo rating 3.37.
 
@@ -84,16 +84,16 @@ Walk-forward test on the 2025 and 2026 seasons: every stage is predicted by mode
 
 The probabilities are calibrated: of the riders given P(top 10) between 0.3 and 0.4, 35% finished in the top 10. The winner figures are the noisy ones (about ±1 point for the men, ±3 for the women between runs).
 
-These figures are for stages whose route is known (profile score, gradient of the final km, elevation). `predict` fetches the route of an upcoming stage from PCS; a stage PCS has not published a profile for is predicted as a typical stage of its kind and scores 4.24 top-10 hits (men) and 4.82 (women) in the same test (`python main.py evaluate --hide-route`).
+These figures are for stages whose route is known (profile score, gradient of the final km, elevation). `predict` fetches the route of an upcoming stage from PCS; a stage PCS has not published a profile for is predicted as a typical stage of its kind and scores 4.25 top-10 hits (men) and 4.82 (women) in the same test (`python main.py evaluate --hide-route`).
 
 ### By terrain (men)
 
 | Terrain | Stages | Top-10 hits | Winner called | AUC |
 |---------|--------|-------------|---------------|-----|
-| Time trial | 56 | 5.71 | 41% | 0.921 |
-| Mountain | 183 | 5.10 | 23% | 0.904 |
-| Flat | 152 | 5.03 | 28% | 0.900 |
-| Hilly | 556 | 4.32 | 26% | 0.870 |
+| Time trial | 56 | 5.71 | 38% | 0.921 |
+| Mountain | 184 | 5.11 | 23% | 0.904 |
+| Flat | 152 | 5.02 | 28% | 0.900 |
+| Hilly | 555 | 4.36 | 27% | 0.872 |
 
 Time trials, flat and mountain stages are the most predictable. Hilly stages are hardest — the label covers both bunch sprints and punchy small-group finishes, and the fields are deep.
 

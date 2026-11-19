@@ -2,7 +2,9 @@
 
 Measured on every stage of the 2025 and 2026 seasons, each predicted by models
 that had only seen earlier stages. Results stored up to 2026-10-18; numbers as
-of the run of 2026-11-17.
+of the run of 2026-11-17. A data fix on 2026-11-19 (stage distances) moved
+them slightly; see "After the re-scrape of 19 November" right below the
+tables.
 
 | Men, per stage | Before | After the model rounds | With stage data | Now |
 |---|---|---|---|---|
@@ -26,6 +28,39 @@ of the run of 2026-11-17.
 Bold in the last column: the change from the column before is outside its
 95% interval. Picking ten riders at random gets 0.77 (men) and 0.92 (women)
 top-10 hits.
+
+### After the re-scrape of 19 November
+
+`scrape-missing --year 2026` and `scrape-elevation` were run from the Mac with
+the round-6 code, and the models retrained and re-measured on the result.
+
+- **Distances:** all 67 stages that had results but distance 0 now have their
+  distance (68 stage rows updated). The check for time trials stored as road
+  stages (RUNBOOK) finds none among them.
+- **No new results:** 67 stages of 2026 are still without one. PCS still
+  answers HTTP 500 for the Tour of Holland, Simac Ladies Tour and
+  International Tour of Hellas pages. Stage 3 of the Vuelta and stage 8 of
+  the Volta a Portugal show no finishing positions on pages fetched after
+  the race, so the stale cache was not the reason for those two.
+- **One label changed:** Vuelta 2026 stage 19 is now `mountain` (was
+  `hilly`), from the re-read race page.
+
+| Per stage | Men, 17 Nov | Men, 19 Nov | Women, 17 Nov | Women, 19 Nov |
+|---|---|---|---|---|
+| Of the model's 10 picks, finished in the top 10 | 4.67 | 4.69 | 5.02 | 5.03 |
+| Of its 3 podium picks, finished on the podium | 1.07 | 1.09 | 1.24 | 1.23 |
+| Winner was its first pick | 26.7% | 27.1% | 35.2% | 35.2% |
+| Winner among its first 3 picks | 49.1% | 48.9% | 56.8% | 57.3% |
+| Winner among its first 10 picks | 71.0% | 71.5% | 77.9% | 77.9% |
+| AUC | 0.884 | 0.885 | 0.891 | 0.891 |
+| Route hidden (`evaluate --hide-route`), top-10 hits | 4.24 | 4.25 | 4.82 | 4.82 |
+
+All of it is inside the noise between runs, as expected for a fix to 67 of the
+1,160 test stages; the gain sits on hilly stages (4.32 to
+4.36 hits, 3.67 to 3.70 with the route hidden). No paired interval was
+computed for this step. The models, `model/evaluation*.json` and the README
+carry the 19 November numbers; the tables and breakdowns in the rest of this
+report are the run of 17 November.
 
 **These numbers are for stages whose route is known** (profile score,
 gradient of the final km, elevation), which is every finished stage. A stage
@@ -456,8 +491,8 @@ score is worth fetching. Two limits of these numbers:
   still to come, and the running season's calendar is refreshed daily. For
   two weeks after a stage a page without the result is asked for again on a
   later day, because PCS enters some results late.
-- **67 stages with results have no distance** (found in round 6; the data is
-  not fixed yet). A stage stored from the stage list before PCS showed its
+- **67 stages with results had no distance** (found in round 6; filled by
+  the Mac run of 19 November). A stage stored from the stage list before PCS showed its
   distance kept `distance_km = 0` once it had results, because `scrape`
   skips such a stage: Tour de Suisse, Tour of Belgium, Tour of Slovenia, Tour
   of Turkey and others between April and July 2026, about one in nine of the
@@ -508,7 +543,8 @@ RUNBOOK, "still on Cloudflare challenge page"); from the Mac it works.
 5. **Rider profiles** for the 77% of riders without one (age mostly).
 6. **The 2027 calendar** from January.
 
-To do from the Mac, small but cheap, then retrain and re-measure:
+Done from the Mac on 19 November, with a retrain and re-measurement (see
+"After the re-scrape of 19 November" at the top); as it was planned:
 
 - `python main.py scrape-missing --year 2026` with the cache rule of round 6
   (at most about 100 pages). It fetches again the two stages that read as
@@ -523,7 +559,8 @@ has no results for another 22 races in the 2026 calendar (43 stages, among
 them Trofeo Baracchi and the Tour of Guangxi women's race). Two stages read
 as cancelled, stage 8 of the Volta a Portugal and stage 3 of the Vuelta, but
 both answers came out of the page cache (see "A page cached before the
-stage"), so they are open until the next scrape. Five empty stage rows are
+stage"); the scrape of 19 November read both from pages fetched after the
+race and found no finishing positions again. Five empty stage rows are
 leftovers of stage lists PCS renumbered (Volta a Portugal `stage-11` and
 `stage-12`; after a prologue was added, Boucles de la Mayenne, Tour of
 Estonia and Deutschland Tour).
