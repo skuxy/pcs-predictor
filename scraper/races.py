@@ -31,10 +31,10 @@ meters:", ...) each followed by value divs up to the next ``<br>``.
 """
 import logging
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Iterator
 
-from scraper.utils import fetch, soup, pcs_url
+from scraper.utils import fetch, soup, pcs_url, pages_newer_than
 from config import SCRAPE_YEARS, MEN_CIRCUITS, WOMEN_CIRCUIT, COBBLED_RACE_SLUGS, GRAVEL_RACE_SLUGS
 
 log = logging.getLogger(__name__)
@@ -170,10 +170,15 @@ def iter_races(
     if circuits is None:
         circuits = MEN_CIRCUITS
     seen_slugs: set[str] = set()
+    today = date.today()
     for year in years:
+        # The calendar of a season still running (or to come) changes: a copy
+        # cached before today is fetched again.  Past seasons stay cached.
+        stale = (today - timedelta(days=1)).isoformat() if year >= today.year else None
         for circuit, race_classes in circuits.items():
             url = pcs_url(f"races.php?year={year}&circuit={circuit}&class=")
-            html = fetch(url)
+            with pages_newer_than(stale):
+                html = fetch(url)
             if not html:
                 continue
             for race in _parse_race_list(html, year, race_classes):

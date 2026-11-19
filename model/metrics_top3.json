@@ -1,0 +1,9 @@
+{
+  "train_cutoff": "2026-10-19",
+  "last_training_stage": "2026-10-18",
+  "gender": "men",
+  "target": "top3",
+  "train_rows": 258103,
+  "train_stages": 1896,
+  "n_features": 184
+}

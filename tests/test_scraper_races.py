@@ -370,3 +370,21 @@ def test_detect_gender_from_calendar_row():
     # men's races stay men's ('we' only as a whole slug token)
     assert _detect_gender("Tour de Pologne", "2.UWT", "race/tour-de-pologne/2026") == "men"
     assert _detect_gender("Gran Premio Industria", "1.1", "race/gp-industria-artigianato-weiler/2026") == "men"
+
+
+def test_calendar_of_a_running_season_is_refreshed_daily(monkeypatch):
+    """Cached pages never expire, but the calendar of the current (or a
+    coming) season changes: iter_races asks for it inside
+    pages_newer_than(yesterday).  Past seasons stay cached."""
+    from datetime import date, timedelta
+    import scraper.races as races_mod
+    from scraper import utils
+
+    seen = {}
+    monkeypatch.setattr(races_mod, "fetch", lambda url: seen.setdefault(url, utils._stale_through) and None)
+    this_year = date.today().year
+    assert list(races_mod.iter_races([this_year - 2, this_year, this_year + 1], circuits={"1": ["1.UWT"]})) == []
+    by_year = {int(url.split("year=")[1].split("&")[0]): stale for url, stale in seen.items()}
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    assert by_year == {this_year - 2: None, this_year: yesterday, this_year + 1: yesterday}
+    assert utils._stale_through is None

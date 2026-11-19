@@ -27,16 +27,15 @@ echo ""
 echo ">> Scraping missing results for $YEAR ..."
 python main.py scrape-missing --year "$YEAR"
 
-# ── 2. Optionally retrain the model ──────────────────────────────────────────
-# Uncomment to auto-retrain weekly (slow — ~5 min):
+# ── 2. Optionally retrain the models ─────────────────────────────────────────
+# Uncomment to auto-retrain weekly on every stored result (~4 min men, ~1 min women on 8 cores):
 #
-# CUTOFF=$(date +%Y-%m-%d)
 # echo ""
-# echo ">> Retraining men's model (cutoff $CUTOFF) ..."
-# python main.py train --cutoff "$CUTOFF"
+# echo ">> Retraining men's models ..."
+# python main.py train
 #
-# echo ">> Retraining women's model ..."
-# python main.py train --gender women --cutoff "$CUTOFF"
+# echo ">> Retraining women's models ..."
+# python main.py train --gender women
 
 # ── 3. Generate static dashboard ─────────────────────────────────────────────
 echo ""

@@ -31,7 +31,7 @@ def _make_df(stages: list[dict]) -> pd.DataFrame:
 
 def _run_backtest(df, top_n=10):
     """Call backtest() with a mocked predict_race and capture stdout."""
-    with patch("model.backtest.predict_race", return_value=df):
+    with patch("model.backtest.backtest_predictions", return_value=(df, "unseen")):
         buf = StringIO()
         with patch("builtins.print", side_effect=lambda *a, **kw: buf.write(" ".join(str(x) for x in a) + "\n")):
             backtest("race/fake/2024", "2024-01-01", top_n=top_n)
@@ -115,7 +115,7 @@ class TestGcLeaderboard:
     def test_empty_predictions_no_crash(self):
         df = pd.DataFrame(columns=["stage_date", "race_name", "rider_id", "rider_name",
                                    "top10_prob", "top10", "position", "profile_type"])
-        with patch("model.backtest.predict_race", return_value=df):
+        with patch("model.backtest.backtest_predictions", return_value=(df, "unseen")):
             # Should not raise
             backtest("race/fake/2024", "2024-01-01")
 

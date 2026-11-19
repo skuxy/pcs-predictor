@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 CLASSIFIER_PATH = Path("model/stage_classifier.pkl")
 LABELS = ["sprint", "breakaway", "gc"]
 
-STAGE_FEATURES = [
+LEGACY_STAGE_FEATURES = [
     "is_flat", "is_hilly", "is_mountain", "is_itt",
     "is_cobbled", "is_gravel",
     "gradient_final_km", "profile_score", "profile_score_per_gradient",
@@ -33,6 +33,10 @@ STAGE_FEATURES = [
     "prev_stage_is_mountain", "prev_stage_is_hilly",
     "is_transition_stage",
 ]
+# + how sprint-prone earlier editions of the race were (the profile label
+# alone cannot tell: half of all "hilly" stages end in a bunch sprint) and the
+# race tier.
+STAGE_FEATURES = LEGACY_STAGE_FEATURES + ["race_bunch_rate_prev", "race_prev_stages", "tier_code"]
 
 
 # ── labelling ─────────────────────────────────────────────────────────────────
@@ -105,14 +109,24 @@ def label_stages(cutoff_date: str | None = None) -> pd.DataFrame:
             """SELECT s.id, s.race_id, s.stage_num, s.date, s.distance_km,
                       s.elevation_m, s.profile_type, s.surface,
                       s.gradient_final_km, s.profile_score,
-                      r.is_stage_race, r.year
+                      r.is_stage_race, r.year, r.pcs_slug AS race_slug, r.class AS race_class
                FROM stages s JOIN races r ON s.race_id = r.id""",
             conn,
         )
 
+    from features.builder import (race_sprint_history, stage_finish_facts, race_tier, TIER_CODE)
+
     stages["date"] = pd.to_datetime(stages["date"], errors="coerce")
     if cutoff_date:
         stages = stages[stages["date"] < pd.Timestamp(cutoff_date)]
+    # Same rule as features.builder: an unread stage page leaves a default
+    # 'mountain' label that says nothing about the stage.
+    untrusted = ((stages["profile_type"] == "mountain") & stages["profile_score"].isna()
+                 & (stages["distance_km"].fillna(0) == 0))
+    stages.loc[untrusted, "profile_type"] = None
+    stages = stages.join(stage_finish_facts(results)[["finish_type"]], on="id")
+    stages = stages.join(race_sprint_history(stages), on="id")
+    stages["tier_code"] = stages["race_class"].map(race_tier).map(TIER_CODE)
 
     # Only stages that have results
     stages_with_results = set(results["stage_id"].unique())
@@ -167,8 +181,9 @@ def label_stages(cutoff_date: str | None = None) -> pd.DataFrame:
 
 # ── training ──────────────────────────────────────────────────────────────────
 
-def train(cutoff_date: str | None = None) -> None:
-    """Train and save the stage outcome classifier."""
+def fit_bundle(cutoff_date: str | None = None, verbose: int = 0) -> dict:
+    """Fit the stage outcome classifier on stages before ``cutoff_date`` and
+    return it as a bundle (nothing is written to disk)."""
     log.info("labelling stages for stage classifier …")
     stages = label_stages(cutoff_date=cutoff_date)
     stages = stages.dropna(subset=["outcome"])
@@ -185,14 +200,19 @@ def train(cutoff_date: str | None = None) -> None:
         max_depth=4,
         min_samples_leaf=10,
         random_state=42,
-        verbose=1,
+        verbose=verbose,
     )
     clf.fit(X, y)
+    return {"model": clf, "labels": clf.classes_.tolist(), "features": list(STAGE_FEATURES)}
 
+
+def train(cutoff_date: str | None = None) -> None:
+    """Train and save the stage outcome classifier."""
+    bundle = fit_bundle(cutoff_date, verbose=1)
     CLASSIFIER_PATH.parent.mkdir(exist_ok=True)
     with open(CLASSIFIER_PATH, "wb") as f:
-        pickle.dump({"model": clf, "labels": clf.classes_.tolist()}, f)
-    log.info("stage classifier saved → %s  (classes: %s)", CLASSIFIER_PATH, clf.classes_.tolist())
+        pickle.dump(bundle, f)
+    log.info("stage classifier saved → %s  (classes: %s)", CLASSIFIER_PATH, bundle["labels"])
 
 
 # ── inference ─────────────────────────────────────────────────────────────────
@@ -213,7 +233,8 @@ def predict_proba(stage_rows: pd.DataFrame, clf_bundle: dict) -> pd.DataFrame:
     clf    = clf_bundle["model"]
     labels = clf_bundle["labels"]
 
-    X = stage_rows[STAGE_FEATURES].copy()
+    # Bundles saved before the race-history features carry no feature list.
+    X = stage_rows[clf_bundle.get("features", LEGACY_STAGE_FEATURES)].copy()
     proba = clf.predict_proba(X)
 
     out = pd.DataFrame(proba, columns=[f"p_{c}" for c in labels], index=stage_rows.index)

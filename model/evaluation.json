@@ -1,0 +1,309 @@
+{
+ "stages": 947,
+ "rows": 129569,
+ "first_stage": "2025-01-21",
+ "last_stage": "2026-10-18",
+ "random_p_at_10": 0.077,
+ "overall": {
+  "group": "all",
+  "stages": 947.0,
+  "p_at_10": 0.4694,
+  "hits3": 1.0908,
+  "win_top1": 0.2714,
+  "win_top3": 0.4889,
+  "win_top10": 0.7149,
+  "winner_rank_median": 4.0,
+  "auc": 0.8854,
+  "ndcg10": 0.528
+ },
+ "by_profile": [
+  {
+   "group": "flat",
+   "stages": 152.0,
+   "p_at_10": 0.502,
+   "hits3": 1.2829,
+   "win_top1": 0.2829,
+   "win_top3": 0.5789,
+   "win_top10": 0.8224,
+   "winner_rank_median": 3.0,
+   "auc": 0.8996,
+   "ndcg10": 0.5813
+  },
+  {
+   "group": "hilly",
+   "stages": 555.0,
+   "p_at_10": 0.4363,
+   "hits3": 0.9928,
+   "win_top1": 0.2703,
+   "win_top3": 0.4649,
+   "win_top10": 0.6793,
+   "winner_rank_median": 4.0,
+   "auc": 0.8718,
+   "ndcg10": 0.4917
+  },
+  {
+   "group": "itt",
+   "stages": 56.0,
+   "p_at_10": 0.5714,
+   "hits3": 1.3571,
+   "win_top1": 0.375,
+   "win_top3": 0.6964,
+   "win_top10": 0.8571,
+   "winner_rank_median": 2.0,
+   "auc": 0.9211,
+   "ndcg10": 0.6398
+  },
+  {
+   "group": "mountain",
+   "stages": 184.0,
+   "p_at_10": 0.5114,
+   "hits3": 1.1467,
+   "win_top1": 0.2337,
+   "win_top3": 0.4239,
+   "win_top10": 0.6902,
+   "winner_rank_median": 5.0,
+   "auc": 0.9038,
+   "ndcg10": 0.5597
+  }
+ ],
+ "by_tier": [
+  {
+   "group": ".1",
+   "stages": 313.0,
+   "p_at_10": 0.48,
+   "hits3": 1.1374,
+   "win_top1": 0.2492,
+   "win_top3": 0.4345,
+   "win_top10": 0.7125,
+   "winner_rank_median": 4.0,
+   "auc": 0.8769,
+   "ndcg10": 0.544
+  },
+  {
+   "group": "ProSeries",
+   "stages": 315.0,
+   "p_at_10": 0.4784,
+   "hits3": 1.0921,
+   "win_top1": 0.2476,
+   "win_top3": 0.5016,
+   "win_top10": 0.7206,
+   "winner_rank_median": 3.0,
+   "auc": 0.8884,
+   "ndcg10": 0.5242
+  },
+  {
+   "group": "WorldTour",
+   "stages": 319.0,
+   "p_at_10": 0.4502,
+   "hits3": 1.0439,
+   "win_top1": 0.3166,
+   "win_top3": 0.5298,
+   "win_top10": 0.7116,
+   "winner_rank_median": 3.0,
+   "auc": 0.8907,
+   "ndcg10": 0.5161
+  }
+ ],
+ "by_race_type": [
+  {
+   "group": "one-day",
+   "stages": 218.0,
+   "p_at_10": 0.4532,
+   "hits3": 1.0092,
+   "win_top1": 0.2706,
+   "win_top3": 0.4587,
+   "win_top10": 0.7339,
+   "winner_rank_median": 4.0,
+   "auc": 0.8895,
+   "ndcg10": 0.5052
+  },
+  {
+   "group": "stage race",
+   "stages": 729.0,
+   "p_at_10": 0.4743,
+   "hits3": 1.1152,
+   "win_top1": 0.2716,
+   "win_top3": 0.4979,
+   "win_top10": 0.7092,
+   "winner_rank_median": 4.0,
+   "auc": 0.8841,
+   "ndcg10": 0.5349
+  }
+ ],
+ "by_year": [
+  {
+   "group": 2025,
+   "stages": 467.0,
+   "p_at_10": 0.4716,
+   "hits3": 1.0857,
+   "win_top1": 0.2548,
+   "win_top3": 0.4882,
+   "win_top10": 0.7131,
+   "winner_rank_median": 4.0,
+   "auc": 0.8869,
+   "ndcg10": 0.5315
+  },
+  {
+   "group": 2026,
+   "stages": 480.0,
+   "p_at_10": 0.4673,
+   "hits3": 1.0958,
+   "win_top1": 0.2875,
+   "win_top3": 0.4896,
+   "win_top10": 0.7167,
+   "winner_rank_median": 4.0,
+   "auc": 0.8839,
+   "ndcg10": 0.5246
+  }
+ ],
+ "hits10_distribution": {
+  "0": 14,
+  "1": 35,
+  "2": 60,
+  "3": 121,
+  "4": 183,
+  "5": 195,
+  "6": 191,
+  "7": 112,
+  "8": 35,
+  "9": 1
+ },
+ "calibration": {
+  "brier": 0.0504526389114315,
+  "log_loss": 0.1763001715210785,
+  "ece": 0.0025523561755974675,
+  "mean_prob_sum_per_stage": 9.993424353618922,
+  "reliability": [
+   {
+    "bin": "0.0\u20130.1",
+    "n": 102790,
+    "predicted": 0.0216,
+    "actual": 0.0202
+   },
+   {
+    "bin": "0.1\u20130.2",
+    "n": 12253,
+    "predicted": 0.1437,
+    "actual": 0.1392
+   },
+   {
+    "bin": "0.2\u20130.3",
+    "n": 5784,
+    "predicted": 0.2434,
+    "actual": 0.2538
+   },
+   {
+    "bin": "0.3\u20130.4",
+    "n": 3220,
+    "predicted": 0.347,
+    "actual": 0.3478
+   },
+   {
+    "bin": "0.4\u20130.5",
+    "n": 2299,
+    "predicted": 0.4478,
+    "actual": 0.4528
+   },
+   {
+    "bin": "0.5\u20130.6",
+    "n": 1592,
+    "predicted": 0.5472,
+    "actual": 0.5603
+   },
+   {
+    "bin": "0.6\u20130.7",
+    "n": 972,
+    "predicted": 0.6442,
+    "actual": 0.6698
+   },
+   {
+    "bin": "0.7\u20130.8",
+    "n": 462,
+    "predicted": 0.7436,
+    "actual": 0.7532
+   },
+   {
+    "bin": "0.8\u20130.9",
+    "n": 148,
+    "predicted": 0.8354,
+    "actual": 0.8514
+   },
+   {
+    "bin": "0.9\u20131.0",
+    "n": 49,
+    "predicted": 0.9557,
+    "actual": 0.8776
+   }
+  ]
+ },
+ "baselines": [
+  {
+   "group": "Top-10 rate, last 90 days",
+   "short": "form 90d",
+   "stages": 947.0,
+   "p_at_10": 0.3035,
+   "hits3": 0.5333,
+   "win_top1": 0.1172,
+   "win_top3": 0.2302,
+   "win_top10": 0.4836,
+   "winner_rank_median": 11.0,
+   "auc": 0.7527,
+   "ndcg10": 0.3209
+  },
+  {
+   "group": "PCS points, last 365 days",
+   "short": "points 365d",
+   "stages": 947.0,
+   "p_at_10": 0.3319,
+   "hits3": 0.735,
+   "win_top1": 0.1911,
+   "win_top3": 0.358,
+   "win_top10": 0.6294,
+   "winner_rank_median": 6.0,
+   "auc": 0.8052,
+   "ndcg10": 0.3861
+  },
+  {
+   "group": "Elo rating (all stages)",
+   "short": "Elo",
+   "stages": 947.0,
+   "p_at_10": 0.3367,
+   "hits3": 0.6272,
+   "win_top1": 0.1341,
+   "win_top3": 0.2756,
+   "win_top10": 0.5417,
+   "winner_rank_median": 9.0,
+   "auc": 0.8194,
+   "ndcg10": 0.3627
+  }
+ ],
+ "config": {
+  "gender": "men",
+  "folds": [
+   "2025-01-01",
+   "2025-04-01",
+   "2025-07-01",
+   "2026-01-01",
+   "2026-04-01",
+   "2026-07-01"
+  ],
+  "targets": [
+   "top10",
+   "top3",
+   "win"
+  ],
+  "n_features": 184,
+  "hide_route": false,
+  "model": {
+   "type": "HistGradientBoostingClassifier \u00d7 5, isotonic-calibrated",
+   "max_iter": 400,
+   "learning_rate": 0.05,
+   "max_leaf_nodes": 31,
+   "max_depth": null,
+   "min_samples_leaf": 40,
+   "max_features": 0.7,
+   "l2_regularization": 1.0
+  },
+  "generated": "2026-11-19"
+ }
+}

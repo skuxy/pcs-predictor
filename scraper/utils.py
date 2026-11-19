@@ -4,6 +4,8 @@ import atexit
 import hashlib
 import pathlib
 import logging
+import datetime
+from contextlib import contextmanager
 from typing import Optional
 
 import requests
@@ -45,6 +47,47 @@ def cache_path(url: str) -> pathlib.Path:
 
 # Keep underscore alias for any external callers during transition.
 _cache_path = cache_path
+
+
+# Set by pages_newer_than(): a cached page written on or before this ISO date
+# is fetched again.  A page this process fetched less than LIVE_CACHE_TTL ago
+# counts as fresh (a second read of the same page, for another fact, uses the
+# copy just fetched; a UI server that stays up for days asks again after six
+# hours); a fetch that failed is tried again at the next read.
+_stale_through: Optional[str] = None
+_fetched_at: dict[str, float] = {}
+
+
+@contextmanager
+def pages_newer_than(date: Optional[str]):
+    """Inside the block, a cached page written on or before ``date`` (ISO) is
+    fetched again and its cache entry replaced.
+
+    Cached pages never expire, so a stage page stored before the stage was
+    ridden would be served for ever: it shows the start list where the result
+    will be (which parses as a cancelled stage) and a provisional route.  Wrap
+    the fetch of a stage's result or route in ``pages_newer_than(stage date)``:
+    only a copy fetched after that day is trusted.  A stage still to come is
+    therefore fetched afresh by every run (once per run, however often the
+    page is read; a process that stays up asks again after LIVE_CACHE_TTL).
+    If the fetch fails the old copy is not served: the caller gets None, as
+    for any page that cannot be fetched.  ``None`` as the date leaves the
+    cache as it is.
+    """
+    global _stale_through
+    previous, _stale_through = _stale_through, date
+    try:
+        yield
+    finally:
+        _stale_through = previous
+
+
+def cached_on(url: str) -> Optional[str]:
+    """ISO date on which the cached copy of ``url`` was written (None if not cached)."""
+    cache_file = cache_path(url)
+    if not cache_file.exists():
+        return None
+    return datetime.date.fromtimestamp(cache_file.stat().st_mtime).isoformat()
 
 
 def _is_cloudflare_challenge(html: str) -> bool:
@@ -184,7 +227,9 @@ def fetch(url: str, use_cache: bool = True) -> Optional[str]:
     """Fetch a URL, respecting rate limits and using an HTML cache.
 
     Falls back to a headless Playwright browser if the server returns a
-    Cloudflare challenge (403 / 'Just a moment...' page).
+    Cloudflare challenge (403 / 'Just a moment...' page).  Cached pages never
+    expire, except start lists (6 hours) and, inside ``pages_newer_than``,
+    copies that predate the given day.
     """
     global _last_request, _browser_only
 
@@ -197,6 +242,10 @@ def fetch(url: str, use_cache: bool = True) -> Optional[str]:
                 return cache_file.read_text(encoding="utf-8")
             cache_file.unlink()
             log.debug("cache expired (startlist): %s", url)
+        elif (_stale_through and (cached_on(url) or "") <= _stale_through
+              and time.time() - _fetched_at.get(url, 0.0) > LIVE_CACHE_TTL):
+            log.info("cached copy of %s is from %s, not after %s — fetching it again",
+                     url, cached_on(url), _stale_through)
         else:
             log.debug("cache hit: %s", url)
             return cache_file.read_text(encoding="utf-8")
@@ -231,6 +280,7 @@ def fetch(url: str, use_cache: bool = True) -> Optional[str]:
     if html:
         pathlib.Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
         cache_file.write_text(html, encoding="utf-8")
+        _fetched_at[url] = time.time()
         log.debug("fetched: %s", url)
         return html
 

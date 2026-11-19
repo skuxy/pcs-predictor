@@ -79,6 +79,20 @@ with get_conn() as conn:
     })
 ```
 
+### Setting up on a fresh Linux machine
+
+```bash
+sudo apt-get install -y python3-venv            # Debian/Ubuntu: `python3 -m venv` needs it
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python3 -m playwright install chromium
+sudo env "PATH=$PATH" python3 -m playwright install-deps chromium   # libatk, libnss3, ... for headless Chromium
+pytest tests/                                   # no network needed
+```
+
+Everything except scraping works straight from the cloned repository
+(database and models are tracked).
+
 ### How PCS is fetched (Cloudflare, browser, cache)
 
 ProCyclingStats sits behind a Cloudflare challenge: plain `requests` get a 403
@@ -89,6 +103,45 @@ on fetches every page of the process through **one shared headless Chromium**
 commands from the project root), so re-runs are near-instant; delete a cache
 file to force a re-fetch. Keep to **one fetching process at a time** and do not
 lower `REQUEST_DELAY`.
+
+**When the log says "still on Cloudflare challenge page".** Cloudflare then
+serves an interactive challenge that a headless browser does not pass (seen
+in November 2026 from a cloud VM: the first page of a new browser session
+loads, every later one is answered 403 with a Turnstile check; plain
+`requests` get 403 at once). The scraper gives up on those URLs and stores
+nothing for them, so it is safe to stop and re-run later from a network PCS
+accepts: on 16 November 2026 the same commands ran from a laptop without a
+single challenge (plain requests, no browser). Nothing else depends on it:
+training, `evaluate`, backtests and the UI only read the database.
+
+**How long a cached page is trusted.** For ever, with four exceptions:
+
+| Page | Fetched again when |
+|---|---|
+| Start list | the copy is older than 6 hours |
+| Calendar of the running (or a coming) season | the copy is from before today |
+| A stage page, when the stage's **result or route** is wanted | the copy was written on or before the stage's day — or, for a stage of the last two weeks that still has no result, before today |
+| Overview and stage list of a finished race | the copy was written on or before the race's last day |
+
+The last two are `scraper.utils.pages_newer_than(day)`, used by `scrape`,
+`scrape-missing`, `scrape-race`, `scrape-elevation` and `predict`. The reason:
+a stage page stored before the stage was ridden shows the start list where
+the result will be, and the parser reads that as a cancelled stage ("no real
+finishing positions (all 'NR' placeholders)"). Before November 2026 such a
+copy was served for ever, so the stage never got its result. A page is
+fetched again at most once per run (a process that stays up, like the UI,
+asks again after six hours), and `scrape` no longer asks for stages that are
+still to come (nothing to store, and no pre-race copy in the cache). PCS
+enters some results a day or more late, hence the two weeks
+(`main.RESULT_SETTLE_DAYS`) in which a stage without a result is asked for
+once a day. A real cancellation still reads the same way — but from a page
+fetched after the stage's day. If the new fetch fails, the old copy is not
+used: the stage simply stays without a result for that run.
+
+The first run after this change fetches again whatever was cached too early:
+for `scrape-missing --year 2026` at most about 100 pages (30 races with open
+stages), for a full `scrape --years 2026` at most about 300. After that the
+copies are newer than the days in question and stay.
 
 Environment knobs:
 
@@ -143,7 +196,9 @@ Things the log will tell you about:
   stage ...") and stage dates follow PCS; stored stages PCS no longer lists are
   left alone (they stay empty).
 - **Still empty** after a run usually means PCS itself has no results (empty
-  table, no "Won how"), or a cancelled stage (all `NR`).
+  table, no "Won how"), or a cancelled stage (all `NR`). An `NR` page that
+  came out of the cache from before the stage's day is fetched again (see
+  "How long a cached page is trusted").
 
 `--backfill-teams` additionally re-parses every stage of the selected races
 (cache first, network otherwise) and fills `team_slug` / `team_name` /
@@ -458,7 +513,53 @@ After a scrape (which doesn't fetch individual stage pages):
 python main.py scrape-elevation
 ```
 
-Fetches `elevation_m` for all stages missing it. Uses the HTML cache, so most will be instant if already scraped. Retrain after.
+Fetches `elevation_m` for all stages missing it, then gradient of the final
+km, profile score and profile type for stages missing those, then the
+distance of stages stored without one. Uses the HTML cache, so most will be
+instant if already scraped. Stages more than three weeks ahead are left for a
+later run (`main.ROUTE_HORIZON_DAYS`). Retrain after.
+
+Run it after every scrape that adds stages. The November 2026 run (from the
+Mac, about 50 minutes for 1,389 stages on a cold cache) took the men's stages
+with results from 59% to 97% with a profile score and from 42% to 99% with an
+elevation — before it, 2.1 and 2.Pro stage races were 11–15% covered — and
+was worth +0.2 top-10 hits per stage in the walk-forward test.
+
+It also repairs a wrong label: a stage that came from the stage list and
+whose page was never read is stored as `mountain` with distance 0 (Tour of
+Belgium and Tour of Slovenia sprint stages). The backfill replaces that
+default with the page's profile; until then `features/builder.py` and the
+stage classifier treat such a stage's profile as unknown. After the November
+run no stage with results carries the default any more.
+
+The distance pass was added in November 2026: a stage stored from the stage
+list before PCS showed its distance kept `distance_km = 0` once it had
+results, because `scrape` skips such a stage. 67 stages of April–July 2026
+were left that way until the run of 19 November 2026 filled them (Tour de Suisse, Tour of Belgium, Tour of Slovenia, Tour
+of Turkey, …): distance 0 and no elevation per km for the model. Their pages
+have the distance (Tour of Belgium stage 1: 188.3 km). A stage that still
+carries the default `mountain` label gets a distance only together with the
+profile its page shows, since the missing distance is what marks the label
+as unread.
+
+Two things it does not catch:
+
+- A stage whose page PCS answers with HTTP 500 stays as it is (in November
+  2026 mainly Tour of Holland 2025–2026, Simac Ladies Tour 2026 and
+  International Tour of Hellas 2023–2026).
+- A one-day time trial whose page has no "Won how" line gets the label of its
+  parcours icon. Chrono des Nations 2023 and 2026 and stage 2 of the Tour de
+  Suisse Women 2023 and 2024 were set to `itt` by hand. To look for more
+  (road-labelled, under 60 km, only the winner on his own time):
+
+  ```sql
+  SELECT s.pcs_slug, s.profile_type, s.distance_km
+  FROM stages s JOIN results x ON x.stage_id = s.id AND x.status = 'finished'
+  WHERE s.profile_type IN ('flat', 'hilly', 'mountain') AND s.distance_km BETWEEN 1 AND 60
+  GROUP BY s.id
+  HAVING COUNT(*) >= 15 AND SUM(x.time_seconds = 0) = 1
+     AND COUNT(DISTINCT CASE WHEN x.position <= 10 THEN x.time_seconds END) >= 9;
+  ```
 
 ### Tag cobbled/gravel stages
 
@@ -477,24 +578,78 @@ python main.py tag-surface
 After scraping new data or making feature changes:
 
 ```bash
-python main.py train --cutoff 2026-03-09 --val-race race/tirreno-adriatico/2026
+python main.py train                      # men: every stored result
+python main.py train --gender women
 ```
 
-The `--cutoff` date is the validation race start date. All data before this date is used for training; the val race is held out for evaluation.
+Trains the stage classifier and three calibrated models per gender — top 10,
+podium (`trained_model[_women]_top3.pkl`) and win (`..._win.pkl`) — on every
+stage with a stored result. On 8 cores the men's three models take about 4
+minutes and the women's one (four times that on a busy machine);
+`--target top10` trains only the main one. `metrics[_women].json` records the last training
+stage, row counts and the feature importances (permutation importance on a
+sample of the last year of training rows).
 
-### Train on a different validation race
+`--cutoff YYYY-MM-DD` trains only on stages before that date, and
+`--val-race race/NAME/YEAR` then scores the new model on a race **on or after**
+the cutoff:
 
 ```bash
 python main.py train --cutoff 2026-08-23 --val-race race/vuelta-a-espana/2026
 ```
 
-### Train women's model
+A validation race before the cutoff is refused (the model has seen it). For an
+accuracy figure worth quoting use `evaluate`, below.
+
+### Measure accuracy (walk-forward)
 
 ```bash
-python main.py train --gender women --cutoff 2026-03-01 --val-race race/strade-bianche-women/2026
+python main.py evaluate                   # men, 2025-01-01 → last result, ~9 min on 6 cores
+python main.py evaluate --gender women    # ~2 min
+python main.py evaluate --top10-only      # skip the podium and win models (three times faster)
+python main.py evaluate --folds 2026-01-01,2026-04-01,2026-07-01 --no-save
+python main.py evaluate --hide-route --top10-only   # test stages without their route; prints only
 ```
 
-Women's model is saved separately as `model/trained_model_women.pkl`.
+Every test window (default: six, starting 2025-01-01, 2025-04-01, 2025-07-01,
+2026-01-01, 2026-04-01, 2026-07-01) is predicted by a stage classifier and
+models fitted only on stages before the window opens. Features need no
+refitting: each one is computed from results dated before the stage it
+describes (`tests/test_features_v2.py` rewrites a stage's own and all later
+results and checks that its features do not move).
+
+`--hide-route` answers "what is a prediction worth before PCS publishes the
+stage's profile?": the models are fitted as usual, but every test stage is
+built without its profile score, final-km gradient and elevation, so it gets
+the typical values of its profile icon (`features.builder.ROUTE_DEFAULTS`).
+November 2026: 4.25 top-10 hits against 4.69 for the men, 4.82 against 5.03
+for the women; hilly stages lose most (3.70 against 4.36). Nothing is saved
+in that mode, and with `--top10-only` only the top-10 columns mean anything.
+
+It prints, overall and by terrain / tier / race type / season:
+
+| Column | Meaning |
+|---|---|
+| p@10 | of the model's 10 picks, the share that finished in the top 10 |
+| podium@3 | how many of its 3 podium picks (by P(podium)) finished on the podium |
+| win#1 / win≤3 / win≤10 | stages where the winner was its first pick / among its first 3 / first 10 (by P(win)) |
+| win rank | median rank it gave the eventual winner |
+| AUC | chance that a top-10 finisher is scored above a rider outside the top 10 |
+| nDCG@10 | position-weighted quality of the predicted top 10 |
+
+followed by three simple rankings for comparison (recent top-10 rate, PCS
+points over a year, Elo rating) and the reliability table of P(top 10).
+
+Unless `--no-save` is given it writes `model/evaluation[_women].json` (the UI's
+Model tab and the dashboard read it) and `model/walkforward[_women].csv.gz`
+(one row per rider and stage with the models' out-of-sample outputs; the
+Historical Backtest tab and `main.py backtest` read it and make the three
+probabilities add up per stage, as `predict` does). Team time trials are
+not scored. Re-run it after a retrain that changes features or model
+settings, so the saved numbers describe the model in use.
+
+`results/accuracy_2026-11.md` has the November 2026 numbers and what each
+change was worth.
 
 ---
 
@@ -502,20 +657,67 @@ Women's model is saved separately as `model/trained_model_women.pkl`.
 
 ### Predict an upcoming race (UI)
 
-Use the **UI** — select the race from the dropdown and click **Run predictions**.
+Use the **UI** — the Predictions tab lists every race that still has a stage
+without a result; pick one and click **Run predictions**.
 
 ### Predict from the command line
 
 ```bash
-python main.py predict race/ronde-van-vlaanderen/2026 --cutoff 2026-04-06
+python main.py predict race/ronde-van-vlaanderen/2027 --cutoff 2027-04-04
 ```
 
-The `--cutoff` date controls which historical data is used for features — set it to the race start date.
+Stages on or after `--cutoff` are predicted. A stage that has a stored result
+is predicted for the riders in that result; a stage still to be ridden is
+predicted for the PCS start list (riders who did not finish the last ridden
+stage are left out).
+
+For the stages still to be ridden, `predict` first asks PCS for the **route**
+where the database lacks it: profile score, gradient of the final km,
+elevation and distance (`model.predict.refresh_open_stage_routes`, one page
+per stage, `/result` too for a one-day race). The calendar scrape stores only
+the profile icon and sometimes the distance; the rest used to arrive with the
+result, i.e. after the race. The model leans on these facts. What PCS has
+not published yet stays empty; the stage is then predicted as a typical stage
+of its icon (`features.builder.ROUTE_DEFAULTS`), and the output says so.
+
+`predict` therefore writes to the database: after predicting an open race,
+`git status` shows `data/cycling.db` as modified (route facts of its stages,
+nothing else). A stored time-trial label is never replaced (before the stage
+the page of a time trial shows a road icon). If the page cannot be fetched or
+the database is locked by a running scrape, the prediction goes ahead without
+the route.
+
+Ridden and open stages go through the same feature code, so an upcoming
+stage gets exactly the features the model was trained on. In a stage race
+the later stages are predicted with the form and GC known today; re-run after
+each stage's result is scraped.
+
+Team and bib come from the start list when PCS shows them (the bib ending in
+1 marks a team's leader; before bibs are assigned that feature is empty and
+the model falls back on the others). Team time trials are not predicted.
+
+### Check the start-list path without PCS
+
+```bash
+python scripts/check_startlist_parity.py race/il-lombardia/2026
+PCS_DEMO_RACE=race/il-lombardia/2026 streamlit run scripts/ui_demo.py
+```
+
+Both work on a temporary copy of the database in which a finished race is
+turned back into an open one, with the riders who started as its start list.
+The first compares the features built from the start list with those built
+from the stored result (they must be identical; exit code 1 otherwise) —
+run it after touching `features/builder.py` or `model/predict.py`. The
+second opens the UI with that race under Predictions, for a look at the tab
+out of season; with `PCS_DEMO_HIDE_ROUTE=1` the race also loses its route, so
+the tab shows the note of a stage predicted as a typical one. Neither needs
+the network, and the model has seen the race, so the probabilities shown are
+not a test of it.
 
 ### Predict a women's race
 
 ```bash
-python main.py predict race/ronde-van-vlaanderen-women/2026 --cutoff 2026-04-06 --gender women
+python main.py predict race/ronde-van-vlaanderen-women/2027 --cutoff 2027-04-04 --gender women
 ```
 
 ---
@@ -524,14 +726,25 @@ python main.py predict race/ronde-van-vlaanderen-women/2026 --cutoff 2026-04-06 
 
 ### Backtest a past race (UI)
 
-Use the **UI** — select the race from the History tab, set the cutoff date to the race start date, and click **Run backtest**.
+Use the **UI** — select the race in the Historical Backtest tab and click
+**Run backtest**. The banner says where the numbers come from:
+
+- **Out of sample (walk-forward)** — the race is covered by the last
+  `evaluate` run; its saved predictions come from models trained only on
+  earlier stages.
+- **Out of sample** — the race is after the current model's training cutoff.
+- **In sample** — the current model was trained on this race and no
+  walk-forward prediction is saved for it (2023–2024 races). The score
+  flatters the model; do not quote it.
 
 ### Backtest from the command line
 
 ```bash
-python main.py backtest --race race/paris-nice/2026 --cutoff 2026-03-08
-python main.py backtest --race race/giro-d-italia/2025 --cutoff 2025-05-09
+python main.py backtest --race race/paris-nice/2026
+python main.py backtest --race race/giro-d-italia/2025
 ```
+
+The header carries the same out-of-sample / in-sample note.
 
 ---
 
@@ -684,7 +897,7 @@ git pull   # get latest DB + model
 If you've scraped new data locally and want to push it:
 
 ```bash
-git add data/cycling.db model/trained_model.pkl model/metrics.json
+git add data/cycling.db model/*.pkl model/*.json model/*.csv.gz
 git commit -m "Update DB and model after 2026 scrape"
 git push
 ```
@@ -736,11 +949,13 @@ python main.py scrape-elevation
 # 3. Tag any new cobbled/gravel races
 python main.py tag-surface
 
-# 4. Retrain
-python main.py train --cutoff YYYY-MM-DD --val-race race/RACE/YEAR
+# 4. Retrain, then re-measure accuracy when features or model settings changed
+python main.py train
+python main.py train --gender women
+python main.py evaluate && python main.py evaluate --gender women
 
 # 5. Commit everything
-git add data/cycling.db model/trained_model.pkl model/metrics.json model/feature_names.json
+git add data/cycling.db model/*.pkl model/*.json model/*.csv.gz
 git commit -m "Season YYYY data + retrain"
 git push
 

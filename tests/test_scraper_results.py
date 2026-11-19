@@ -508,3 +508,19 @@ def test_ttt_status_marker_makes_a_non_finisher():
     assert ranked == [(1, "jonas-vingegaard", 0), (2, "filippo-ganna", 7),
                       (3, "josh-tarling", 27), (4, "sepp-kuss", 117)]
     assert [r["rider_slug"] for r in res[-2:]] == ["mauro-schmid", "mark-padun"]
+
+
+def test_rider_slug_drops_the_discipline_suffix():
+    """PCS links riders with several disciplines as rider/<slug>/road (Japan
+    Cup 2026: Taaramäe, Simmons): the slug is the first path segment."""
+    from bs4 import BeautifulSoup
+    from scraper.results import _rider_slug
+
+    def link(href):
+        return BeautifulSoup(f'<a href="{href}">X</a>', "lxml").a
+
+    assert _rider_slug(link("rider/rein-taaramae/road")) == "rein-taaramae"
+    assert _rider_slug(link("rider/quinn-simmons")) == "quinn-simmons"
+    assert _rider_slug(link("/rider/quinn-simmons/road?x=1")) == "quinn-simmons"
+    assert _rider_slug(link("rider/")) == ""
+    assert _rider_slug(link("team/lidl-trek-2026")) == ""

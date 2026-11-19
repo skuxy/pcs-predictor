@@ -4,7 +4,9 @@ import pandas as pd
 import pytest
 from sklearn.ensemble import HistGradientBoostingClassifier
 
-from model.stage_classifier import _label, _compute_gc_ranks, predict_proba, STAGE_FEATURES
+from model.stage_classifier import (
+    _label, _compute_gc_ranks, predict_proba, STAGE_FEATURES, LEGACY_STAGE_FEATURES,
+)
 
 
 class TestLabel:
@@ -127,7 +129,7 @@ class TestPredictProba:
         y = ["sprint", "gc", "breakaway"]
         clf = HistGradientBoostingClassifier(max_iter=10, random_state=0)
         clf.fit(X, y)
-        return {"model": clf, "labels": clf.classes_.tolist()}
+        return {"model": clf, "labels": clf.classes_.tolist(), "features": list(STAGE_FEATURES)}
 
     def test_output_columns(self):
         bundle = self._bundle()
@@ -147,6 +149,15 @@ class TestPredictProba:
         y = ["sprint", "gc", "sprint", "gc"]
         clf = HistGradientBoostingClassifier(max_iter=10, random_state=0)
         clf.fit(X, y)
-        bundle = {"model": clf, "labels": clf.classes_.tolist()}
+        bundle = {"model": clf, "labels": clf.classes_.tolist(), "features": list(STAGE_FEATURES)}
         out_cols = predict_proba(pd.DataFrame([{f: 0.0 for f in STAGE_FEATURES}]), bundle).columns
         assert "p_breakaway" in out_cols
+
+    def test_bundle_saved_before_the_race_history_features(self):
+        # A classifier pickled without a feature list was trained on the first 17 features.
+        X = pd.DataFrame([{f: float(i) for f in LEGACY_STAGE_FEATURES} for i in range(4)])
+        clf = HistGradientBoostingClassifier(max_iter=10, random_state=0).fit(X, ["sprint", "gc", "sprint", "gc"])
+        bundle = {"model": clf, "labels": clf.classes_.tolist()}
+        rows = pd.DataFrame([{f: 0.0 for f in STAGE_FEATURES}])
+        out = predict_proba(rows, bundle)
+        assert list(out.columns) == ["p_sprint", "p_breakaway", "p_gc"]
